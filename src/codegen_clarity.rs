@@ -15,11 +15,14 @@
 //!   shell (also clearly delimited) that requires the Clarity toolchain.
 //!
 //! Exactness notes:
-//! - CuNi `int` is Clarity `int` (128-bit signed). Clarity's `/` and `mod`
-//!   truncate toward zero like CuNi's; division or modulo by zero aborts
-//!   loudly at runtime — never a value, never silent. 128-bit overflow
-//!   aborts loudly too. (Re-verify the truncate claim on the Clarity
-//!   toolchain before deployment — see honest boundaries.)
+//! - CuNi `int` is Clarity `int` (128-bit signed). CuNi `/` truncates
+//!   toward zero and `%` floors (measured 2026-11-17: -7 / 3 = -2,
+//!   -7 % 3 = 2); the division identity is broken by design. Whether
+//!   Clarity's native `/` and `mod` match is UNVERIFIED (the docs say
+//!   only "remainder") — re-verify on the Clarity toolchain before
+//!   deployment (see honest boundaries); division or modulo by zero
+//!   aborts loudly at runtime — never a value, never silent. 128-bit
+//!   overflow aborts loudly too.
 //! - CuNi `dec` is a scaled Clarity `int` (scale 10^4, docs/DECIMAL.md):
 //!   `a + b` / `a - b` on the scaled integers; `a * b` lowers to
 //!   `(/ (* a b) 10000)`; `a / b` lowers to `(/ (* a 10000) b)` —
@@ -442,8 +445,8 @@ impl Codegen {
         self.line(0, ";;");
         self.line(0, ";; HONEST BOUNDARIES: the logic core is gate-proven via the Python");
         self.line(0, ";; reference; the contract shell is NOT compiled here and nothing has");
-        self.line(0, ";; executed on-chain. Re-verify `/`-and-`mod`-truncate-toward-zero on");
-        self.line(0, ";; the Clarity toolchain before deployment.");
+        self.line(0, ";; executed on-chain. Re-verify that Clarity `mod` matches CuNi's");
+        self.line(0, ";; floored `%` (-7 % 3 = 2) on the Clarity toolchain before deployment.");
         self.line(0, ";; Full verification matrix: docs/ONCHAIN.md.");
         self.out.push('\n');
 
@@ -1196,11 +1199,15 @@ impl PyGen {
         self.line(0, "");
         self.line(
             0,
-            "The pure program logic as Python: `int` division and modulo truncate toward",
+            "The pure program logic as Python: `int` division truncates toward",
         );
         self.line(
             0,
-            "zero (never Python's floor), `dec` is a scaled `int` (scale 10^4,",
+            "zero and modulo floors (CuNi `%`: -7 % 3 = 2, measured 2026-11-17),",
+        );
+        self.line(
+            0,
+            "`dec` is a scaled `int` (scale 10^4,",
         );
         self.line(
             0,

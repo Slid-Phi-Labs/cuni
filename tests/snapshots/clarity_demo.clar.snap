@@ -14,8 +14,8 @@
 ;;
 ;; HONEST BOUNDARIES: the logic core is gate-proven via the Python
 ;; reference; the contract shell is NOT compiled here and nothing has
-;; executed on-chain. Re-verify `/`-and-`mod`-truncate-toward-zero on
-;; the Clarity toolchain before deployment.
+;; executed on-chain. Re-verify that Clarity `mod` matches CuNi's
+;; floored `%` (-7 % 3 = 2) on the Clarity toolchain before deployment.
 ;; Full verification matrix: docs/ONCHAIN.md.
 
 ;; CUNI-LOGIC-CORE-START

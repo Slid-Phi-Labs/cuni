@@ -7,22 +7,33 @@
 //! lines) over this core.
 //!
 //! ## Supported (core subset)
-//! - `say(x)` for int/str/bool (single argument)
-//! - `let`/`mut` bindings for int/str/bool
-//S- `def`/`ret` — monomorphic, int/str/bool params and returns
+//! - `say(x)` for int/str/bool/dec (single argument)
+//! - `let`/`mut` bindings for int/str/bool/dec
+//! - `def`/`ret` — monomorphic, int/str/bool/dec params and returns
 //! - `if`/`else`, `while`
 //! - int arithmetic `+ - *`; int `/` (truncate toward zero) and `%`
 //!   (Python-floored) via per-language helpers where the native operators
 //!   differ
+//! - `dec` arithmetic (docs/DECIMAL.md): `dec` literals (scaled integers,
+//!   scale 10^4), `+`/`-` plain, `*`/`/` via the spec's `dec_mul_helper` /
+//!   `dec_div_helper` (truncation toward zero; division by zero fails
+//!   loudly), comparisons on scaled integers, unary `-`, `say(dec)` via
+//!   `dec_str_helper` (canonical rendering, §6). A seat whose spec leaves
+//!   a dec helper `None` refuses that dec operation honestly.
 //! - comparisons `== != < > <= >=`, `and`/`or`/`not`, unary `-`/`not`
 //! - string literals (escaped) and `+` concatenation
 //!
 //! ## Refused (honest Err, never approximated)
-//! `float`/`dec`/`time` literals and ops, `typ`, `enum`, `iface`, generics,
+//! `float`/`time` literals and ops, `typ`, `enum`, `iface`, generics,
 //! `opt`/`none`, fallible `?` / `fail` / `??`, `link`, `ext`, lists, maps,
 //! indexing, field access, `for` loops, `todo`, interpolated strings, and
 //! anything else not listed above. A seat that refuses is a real seat; a
 //! seat that approximates is a lie.
+//!
+//! `dec` conversions (`dec_of_int`/`int_of_dec`, docs/DECIMAL.md §5) are
+//! NOT in the core subset: a core seat refuses a call to them (unknown
+//! function). The twelve hand-written dec seats implement them; a core
+//! seat that needs them must be promoted to a hand-written backend.
 
 use crate::ast::*;
 
@@ -71,6 +82,26 @@ pub struct LangSpec {
     /// If `Some(helper)`, int `%` emits `helper(lhs, rhs)`; if `None`, the
     /// language's native `%` is already Python-floored.
     pub int_mod_helper: Option<&'static str>,
+    /// If `Some(helper)`, dec `*` emits `helper(lhs, rhs)`; the helper must
+    /// compute `trunc(a*b/10000)` toward zero (docs/DECIMAL.md §3). If
+    /// `None`, dec `*` refuses honestly.
+    pub dec_mul_helper: Option<&'static str>,
+    /// If `Some(helper)`, dec `/` emits `helper(lhs, rhs)`; the helper must
+    /// compute `trunc(a*10000/b)` toward zero and fail loudly on division
+    /// by zero. If `None`, dec `/` refuses honestly.
+    pub dec_div_helper: Option<&'static str>,
+    /// If `Some(helper)`, `say(dec)` emits `cuni_say(helper(v), "str")`
+    /// where the helper renders the canonical decimal string
+    /// (docs/DECIMAL.md §6). If `None`, `say(dec)` refuses honestly.
+    pub dec_str_helper: Option<&'static str>,
+    /// Suffix appended to emitted dec literals, e.g. `"L"` for int64 seats
+    /// whose literals default to a narrower int (F#). `""` for most.
+    pub dec_lit_suffix: &'static str,
+    /// If `Some(max)`, dec literals with `|scaled| > max` refuse at emit
+    /// (narrow-seat envelope, docs/DECIMAL.md §7: `i64::MAX` for 64-bit
+    /// seats, `i32::MAX` for 32-bit seats, `2^53` for double seats);
+    /// `None` = wide seat (bignum), literals emitted unchecked.
+    pub dec_max_abs: Option<i128>,
     /// String concatenation format with `{l}` and `{r}` placeholders,
     /// e.g. `"({l} + {r})"` (most), `"({l} . {r})"` (PHP/Perl),
     /// `"[string cat {l} {r}]"` (Tcl). Used for `+` when both operands are
@@ -111,11 +142,15 @@ pub struct Emitter<'a> {
 }
 
 /// Minimal type for `+` routing (numeric vs string concat).
+/// `Dec` is a scaled integer (docs/DECIMAL.md, scale 10^4); it behaves
+/// like `Int` for `+`/`-`/comparisons and routes `*`/`/` through the
+/// spec's dec helpers.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Ty {
     Int,
     Str,
     Bool,
+    Dec,
 }
 
 fn ty_of(ty: &Type) -> Result<Ty, String> {
@@ -123,6 +158,7 @@ fn ty_of(ty: &Type) -> Result<Ty, String> {
         Type::Named(n) if n == "int" => Ok(Ty::Int),
         Type::Named(n) if n == "str" => Ok(Ty::Str),
         Type::Named(n) if n == "bool" => Ok(Ty::Bool),
+        Type::Named(n) if n == "dec" => Ok(Ty::Dec),
         _ => Err("type beyond core subset; refusing".into()),
     }
 }
@@ -351,10 +387,21 @@ impl<'a> Emitter<'a> {
                                     return Err("say: exactly one argument in core subset; refusing".into());
                                 }
                                 let (v, vt) = self.gen_expr(args[0].expr())?;
-                                let tys = match vt {
-                                    Ty::Int => "int",
-                                    Ty::Str => "str",
-                                    Ty::Bool => "bool",
+                                // `dec` prints through the spec's canonical
+                                // renderer (docs/DECIMAL.md §6) as a string.
+                                let (v, tys) = match vt {
+                                    Ty::Int => (v, "int"),
+                                    Ty::Str => (v, "str"),
+                                    Ty::Bool => (v, "bool"),
+                                    Ty::Dec => match self.spec.dec_str_helper {
+                                        Some(h) => (format!("{}({})", h, v), "str"),
+                                        None => {
+                                            return Err(
+                                                "say(dec): beyond core subset; refusing"
+                                                    .into(),
+                                            )
+                                        }
+                                    },
                                 };
                                 self.line(&sub(self.spec.say_fmt, &[("expr", &v), ("ty", tys)]));
                                 return Ok(());
@@ -378,7 +425,18 @@ impl<'a> Emitter<'a> {
             )),
             ExprKind::Str(s) => Ok(((self.spec.str_quote)(s), Ty::Str)),
             ExprKind::Float(_) => Err("float: beyond core subset; refusing".into()),
-            ExprKind::Dec(_) => Err("dec: beyond core subset; refusing".into()),
+            ExprKind::Dec(v) => {
+                // Scaled integer (the parser scaled once, ast.rs); narrow
+                // seats refuse out-of-envelope literals at emit time.
+                if let Some(max) = self.spec.dec_max_abs {
+                    if *v > max || *v < -max {
+                        return Err(format!(
+                            "dec literal `{v}` exceeds this seat's envelope (|scaled| <= {max}); refusing"
+                        ));
+                    }
+                }
+                Ok((format!("{}{}", v, self.spec.dec_lit_suffix), Ty::Dec))
+            }
             ExprKind::Time(_) => Err("time: beyond core subset; refusing".into()),
             ExprKind::NoneLit => Err("none: beyond core subset; refusing".into()),
             ExprKind::Ident(n) => {
@@ -419,6 +477,15 @@ impl<'a> Emitter<'a> {
             ExprKind::Binary { op, lhs, rhs } => {
                 let (l, lt) = self.gen_expr(lhs)?;
                 let (r, rt) = self.gen_expr(rhs)?;
+                // `dec` and `int` never mix (typeck refuses first; this is
+                // defense in depth). Comparisons on dec compare scaled ints.
+                if matches!(op, BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge)
+                    && ((lt == Ty::Dec) != (rt == Ty::Dec))
+                {
+                    return Err(
+                        "mixed dec/int comparison: beyond core subset; refusing".into(),
+                    );
+                }
                 let o: String = match op {
                     BinOp::Add => {
                         // String concat vs numeric add, routed by operand types.
@@ -429,7 +496,9 @@ impl<'a> Emitter<'a> {
                                 sub(self.spec.concat_fmt, &[("l", &l2), ("r", &r2)]),
                                 Ty::Str,
                             ));
-                        } else if lt == Ty::Int && rt == Ty::Int {
+                        } else if (lt == Ty::Int && rt == Ty::Int)
+                            || (lt == Ty::Dec && rt == Ty::Dec)
+                        {
                             "+".to_string()
                         } else {
                             return Err(
@@ -438,15 +507,40 @@ impl<'a> Emitter<'a> {
                         }
                     }
                     BinOp::Sub => {
-                        self.require_ints(lt, rt, "-")?;
+                        self.require_num_pair(lt, rt, "-")?;
                         "-".to_string()
                     }
                     BinOp::Mul => {
-                        self.require_ints(lt, rt, "*")?;
+                        let pair = self.require_num_pair(lt, rt, "*")?;
+                        if pair == Ty::Dec {
+                            // trunc(a*b/10000) toward zero (DECIMAL.md §3).
+                            return match self.spec.dec_mul_helper {
+                                Some(h) => Ok((
+                                    format!("{}({}, {})", h, l, r),
+                                    Ty::Dec,
+                                )),
+                                None => Err(
+                                    "dec `*`: beyond core subset; refusing".into()
+                                ),
+                            };
+                        }
                         "*".to_string()
                     }
                     BinOp::Div => {
-                        self.require_ints(lt, rt, "/")?;
+                        let pair = self.require_num_pair(lt, rt, "/")?;
+                        if pair == Ty::Dec {
+                            // trunc(a*10000/b) toward zero; b == 0 fails
+                            // loudly in the helper (DECIMAL.md §3).
+                            return match self.spec.dec_div_helper {
+                                Some(h) => Ok((
+                                    format!("{}({}, {})", h, l, r),
+                                    Ty::Dec,
+                                )),
+                                None => Err(
+                                    "dec `/`: beyond core subset; refusing".into()
+                                ),
+                            };
+                        }
                         // Integer division truncates toward zero (CuNi).
                         if let Some(h) = self.spec.int_div_helper {
                             return Ok((format!("{}( {}, {} )", h, l, r).replace("( ", "(").replace(" )", ")"), Ty::Int));
@@ -454,6 +548,9 @@ impl<'a> Emitter<'a> {
                         "/".to_string()
                     }
                     BinOp::Mod => {
+                        if lt == Ty::Dec || rt == Ty::Dec {
+                            return Err("`%` is not defined on `dec`".into());
+                        }
                         self.require_ints(lt, rt, "%")?;
                         // Python-floored modulo (CuNi).
                         if let Some(h) = self.spec.int_mod_helper {
@@ -514,7 +611,9 @@ impl<'a> Emitter<'a> {
                 };
                 let result_ty = match op {
                     BinOp::Add if lt == Ty::Str => Ty::Str,
-                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => Ty::Int,
+                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
+                        if lt == Ty::Dec { Ty::Dec } else { Ty::Int }
+                    }
                     _ => Ty::Bool,
                 };
                 Ok((format!("({} {} {})", l, o, r), result_ty))
@@ -529,13 +628,23 @@ impl<'a> Emitter<'a> {
                         Ok((format!("(!{})", v), Ty::Bool))
                     }
                     UnOp::Neg => {
-                        if t != Ty::Int {
-                            return Err("unary `-` on non-int: beyond core subset; refusing".into());
+                        if t != Ty::Int && t != Ty::Dec {
+                            return Err("unary `-` on non-int/dec: beyond core subset; refusing".into());
                         }
-                        Ok((format!("(-{})", v), Ty::Int))
+                        Ok((format!("(-{})", v), t))
                     }
                 }
             }
+        }
+    }
+
+    fn require_num_pair(&self, l: Ty, r: Ty, op: &str) -> Result<Ty, String> {
+        if l == Ty::Int && r == Ty::Int {
+            Ok(Ty::Int)
+        } else if l == Ty::Dec && r == Ty::Dec {
+            Ok(Ty::Dec)
+        } else {
+            Err(format!("`{}` on mixed types: beyond core subset; refusing", op))
         }
     }
 

@@ -42,6 +42,7 @@ enum Ty {
     Int,
     Str,
     Bool,
+    Dec,
 }
 
 fn ty_of(ty: &Type) -> Result<Ty, String> {
@@ -49,6 +50,7 @@ fn ty_of(ty: &Type) -> Result<Ty, String> {
         Type::Named(n) if n == "int" => Ok(Ty::Int),
         Type::Named(n) if n == "str" => Ok(Ty::Str),
         Type::Named(n) if n == "bool" => Ok(Ty::Bool),
+        Type::Named(n) if n == "dec" => Ok(Ty::Dec),
         _ => Err("type beyond core subset; refusing".into()),
     }
 }
@@ -105,10 +107,41 @@ impl Emitter {
         self.line("void cuni_say(Object? x, String ty) {");
         self.level += 1;
         self.line("if (ty == \"bool\") { print((x as bool) ? \"True\" : \"False\"); }");
+        self.line("else if (ty == \"dec\") { print(cuniDecStr(x as int)); }");
         self.line("else { print(x); }");
         self.level -= 1;
         self.line("}");
         self.line("int cuni_div(int a, int b) => a ~/ b;");
+        // dec (docs/DECIMAL.md §3, §6): scaled int, scale 10^4. Mul/div
+        // run through BigInt and refuse loudly on overflow; division by
+        // zero throws before the division.
+        self.line("int cuniDecMul(int a, int b) {");
+        self.level += 1;
+        self.line("final p = (BigInt.from(a) * BigInt.from(b)) ~/ BigInt.from(10000);");
+        self.line("if (p > BigInt.from(9223372036854775807) || p < -BigInt.from(9223372036854775807) - BigInt.one) { throw StateError('cuni: dec multiplication overflow'); }");
+        self.line("return p.toInt();");
+        self.level -= 1;
+        self.line("}");
+        self.line("int cuniDecDiv(int a, int b) {");
+        self.level += 1;
+        self.line("if (b == 0) { throw StateError('cuni: dec division by zero'); }");
+        self.line("final p = (BigInt.from(a) * BigInt.from(10000)) ~/ BigInt.from(b);");
+        self.line("if (p > BigInt.from(9223372036854775807) || p < -BigInt.from(9223372036854775807) - BigInt.one) { throw StateError('cuni: dec division overflow'); }");
+        self.line("return p.toInt();");
+        self.level -= 1;
+        self.line("}");
+        self.line("String cuniDecStr(int v) {");
+        self.level += 1;
+        self.line("final s = v < 0 ? '-' : '';");
+        self.line("final a = BigInt.from(v).abs();");
+        self.line("final ip = a ~/ BigInt.from(10000);");
+        self.line("final fr = a % BigInt.from(10000);");
+        self.line("var fs = fr.toString().padLeft(4, '0');");
+        self.line("while (fs.endsWith('0')) { fs = fs.substring(0, fs.length - 1); }");
+        self.line("if (fs.isEmpty) { fs = '0'; }");
+        self.line("return '$s$ip.$fs';");
+        self.level -= 1;
+        self.line("}");
         self.line("int cuni_mod(int a, int b) {");
         self.level += 1;
         self.line("int e = a % b;");
@@ -297,6 +330,7 @@ impl Emitter {
                                 Ty::Int => "int",
                                 Ty::Str => "str",
                                 Ty::Bool => "bool",
+                                Ty::Dec => "dec",
                             };
                             self.line(&format!("cuni_say({}, \"{}\");", v, tys));
                             return Ok(());
@@ -319,7 +353,17 @@ impl Emitter {
             )),
             ExprKind::Str(s) => Ok((dart_str(s), Ty::Str)),
             ExprKind::Float(_) => Err("float: beyond core subset; refusing".into()),
-            ExprKind::Dec(_) => Err("dec: beyond core subset; refusing".into()),
+            ExprKind::Dec(v) => {
+                // Scaled integer (parser scaled once, ast.rs); narrow seats
+                // refuse out-of-envelope literals at emit (DECIMAL.md §7).
+                if *v > i64::MAX as i128 || *v < -(i64::MAX as i128) {
+                    return Err(format!(
+                        "dec literal `{v}` exceeds this seat's envelope (|scaled| <= {}); refusing",
+                        i64::MAX
+                    ));
+                }
+                Ok((v.to_string(), Ty::Dec))
+            }
             ExprKind::Time(_) => Err("time: beyond core subset; refusing".into()),
             ExprKind::NoneLit => Err("none: beyond core subset; refusing".into()),
             ExprKind::Ident(n) => {
@@ -383,6 +427,30 @@ impl Emitter {
                     };
                     return Ok((cmp, Ty::Bool));
                 }
+                // dec pairs (docs/DECIMAL.md §3): + / - plain, * / via
+                // helpers (trunc toward zero), % refused, comparisons on
+                // the scaled integers.
+                if lt == Ty::Dec && rt == Ty::Dec {
+                    return match op {
+                        BinOp::Add => Ok((format!("({} + {})", l, r), Ty::Dec)),
+                        BinOp::Sub => Ok((format!("({} - {})", l, r), Ty::Dec)),
+                        BinOp::Mul => Ok((format!("cuniDecMul({}, {})", l, r), Ty::Dec)),
+                        BinOp::Div => Ok((format!("cuniDecDiv({}, {})", l, r), Ty::Dec)),
+                        BinOp::Mod => Err("`%` is not defined on `dec`".into()),
+                        BinOp::Eq => Ok((format!("({} == {})", l, r), Ty::Bool)),
+                        BinOp::Ne => Ok((format!("({} != {})", l, r), Ty::Bool)),
+                        BinOp::Lt => Ok((format!("({} < {})", l, r), Ty::Bool)),
+                        BinOp::Gt => Ok((format!("({} > {})", l, r), Ty::Bool)),
+                        BinOp::Le => Ok((format!("({} <= {})", l, r), Ty::Bool)),
+                        BinOp::Ge => Ok((format!("({} >= {})", l, r), Ty::Bool)),
+                        _ => Err(format!("dec `{:?}`: beyond core subset; refusing", op)),
+                    };
+                }
+                // `dec` and `int` never mix (typeck refuses first; this is
+                // defense in depth).
+                if (lt == Ty::Dec) != (rt == Ty::Dec) {
+                    return Err("mixed dec/int: beyond core subset; refusing".into());
+                }
                 let o: &str = match op {
                     BinOp::Add => {
                         self.require_ints(lt, rt, "+")?;
@@ -436,10 +504,10 @@ impl Emitter {
                         Ok((format!("(!{})", v), Ty::Bool))
                     }
                     UnOp::Neg => {
-                        if t != Ty::Int {
-                            return Err("unary `-` on non-int: beyond core subset; refusing".into());
+                        if t != Ty::Int && t != Ty::Dec {
+                            return Err("unary `-` on non-int/dec: beyond core subset; refusing".into());
                         }
-                        Ok((format!("(-{})", v), Ty::Int))
+                        Ok((format!("(-{})", v), t))
                     }
                 }
             }

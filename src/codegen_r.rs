@@ -52,7 +52,19 @@ cuni_say <- function(x, ty) {\n\
   else { cat(x, \"\\n\", sep = \"\") }\n\
 }\n\
 cuni_div <- function(a, b) trunc(a / b)\n\
-cuni_mod <- function(a, b) a %% b\n",
+cuni_mod <- function(a, b) a %% b\n\
+cuni_dec_mul <- function(a, b) trunc(a * b / 10000)\n\
+cuni_dec_div <- function(a, b) { if (b == 0) stop(\"cuni: dec division by zero\"); trunc(a * 10000 / b) }\n\
+cuni_dec_str <- function(v) {\n\
+  s <- if (v < 0) \"-\" else \"\"\n\
+  a <- abs(v)\n\
+  ip <- trunc(a / 10000)\n\
+  fr <- a %% 10000\n\
+  fs <- sprintf(\"%04.0f\", fr)\n\
+  fs <- sub(\"0+$\", \"\", fs)\n\
+  if (fs == \"\") fs <- \"0\"\n\
+  paste0(s, format(ip, scientific = FALSE, trim = TRUE), \".\", fs)\n\
+}\n",
     main_open: "",
     main_close: "",
     let_fmt: "{name} <- {expr}",
@@ -74,6 +86,13 @@ cuni_mod <- function(a, b) a %% b\n",
     int_div_helper: Some("cuni_div"),
     // R `%%` is already Python-floored; the helper just names it.
     int_mod_helper: Some("cuni_mod"),
+    // dec (docs/DECIMAL.md §3, §6): doubles, so literals are
+    // envelope-checked against 2^53 (exact-int range).
+    dec_mul_helper: Some("cuni_dec_mul"),
+    dec_div_helper: Some("cuni_dec_div"),
+    dec_str_helper: Some("cuni_dec_str"),
+    dec_lit_suffix: "",
+    dec_max_abs: Some(9_007_199_254_740_992),
     str_eq_op: "==",
     str_ne_op: "!=",
     str_lt_op: "<",

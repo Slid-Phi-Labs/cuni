@@ -16,8 +16,8 @@
 ///
 /// HONEST BOUNDARIES: the logic core is gate-proven via the Python
 /// reference; the contract shell is NOT compiled here and nothing has
-/// executed on-chain. Re-verify Int256 `/`-and-`%`-truncate-toward-zero
-/// on the Cadence toolchain before deployment.
+/// executed on-chain. Re-verify that Cadence `%` matches CuNi's
+/// floored `%` (-7 % 3 = 2) on the Cadence toolchain before deployment.
 /// Full verification matrix: docs/ONCHAIN.md.
 
 // CUNI-CADENCE-SHELL-START

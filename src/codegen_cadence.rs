@@ -16,10 +16,13 @@
 //!   requires the Flow/Cadence toolchain.
 //!
 //! Exactness notes:
-//! - CuNi `int` is Cadence `Int256`. Cadence integer `/` and `%` truncate
-//!   toward zero like CuNi's (re-verify on the Cadence toolchain before
-//!   deployment — see honest boundaries); division or modulo by zero is a
-//!   loud runtime error — never a value, never silent.
+//! - CuNi `int` is Cadence `Int256`. CuNi `/` truncates toward zero and
+//!   `%` floors (measured 2026-11-17: -7 / 3 = -2, -7 % 3 = 2); the
+//!   division identity is broken by design. Whether Cadence's native `/`
+//!   and `%` match is UNVERIFIED (the docs say only "remainder") —
+//!   re-verify on the Cadence toolchain before deployment (see honest
+//!   boundaries); division or modulo by zero is a loud runtime error —
+//!   never a value, never silent.
 //! - CuNi `dec` is a scaled `Int256` (scale 10^4, docs/DECIMAL.md). This is
 //!   deliberately NOT Cadence's native `Fix64` (scale 10^8): CuNi proves the
 //!   semantics it was given, and a different fixed-point scale would be a
@@ -334,8 +337,8 @@ impl Codegen {
         self.line(0, "///");
         self.line(0, "/// HONEST BOUNDARIES: the logic core is gate-proven via the Python");
         self.line(0, "/// reference; the contract shell is NOT compiled here and nothing has");
-        self.line(0, "/// executed on-chain. Re-verify Int256 `/`-and-`%`-truncate-toward-zero");
-        self.line(0, "/// on the Cadence toolchain before deployment.");
+        self.line(0, "/// executed on-chain. Re-verify that Cadence `%` matches CuNi's");
+        self.line(0, "/// floored `%` (-7 % 3 = 2) on the Cadence toolchain before deployment.");
         self.line(0, "/// Full verification matrix: docs/ONCHAIN.md.");
         self.out.push('\n');
 
@@ -991,11 +994,15 @@ impl PyGen {
         self.line(0, "");
         self.line(
             0,
-            "The pure program logic as Python: `int` division and modulo truncate toward",
+            "The pure program logic as Python: `int` division truncates toward",
         );
         self.line(
             0,
-            "zero (never Python's floor), `dec` is a scaled `int` (scale 10^4,",
+            "zero and modulo floors (CuNi `%`: -7 % 3 = 2, measured 2026-11-17),",
+        );
+        self.line(
+            0,
+            "`dec` is a scaled `int` (scale 10^4,",
         );
         self.line(
             0,

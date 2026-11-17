@@ -19,6 +19,7 @@ enum Ty {
     Int,
     Str,
     Bool,
+    Dec,
 }
 
 fn ty_of(t: &Type) -> Result<Ty, String> {
@@ -26,6 +27,7 @@ fn ty_of(t: &Type) -> Result<Ty, String> {
         Type::Named(n) if n == "int" => Ok(Ty::Int),
         Type::Named(n) if n == "str" => Ok(Ty::Str),
         Type::Named(n) if n == "bool" => Ok(Ty::Bool),
+        Type::Named(n) if n == "dec" => Ok(Ty::Dec),
         _ => Err("type beyond core subset; refusing".into()),
     }
 }
@@ -253,8 +255,25 @@ fn assigned_outer(stmts: &[S], outer: &HashSet<String>) -> Vec<String> {
 
 const HEADER: &str = r#"defmodule CuniProg do
   def cuni_say(x, :bool), do: IO.puts(if x, do: "True", else: "False")
+  def cuni_say(x, :dec), do: IO.puts(cuni_dec_str(x))
   def cuni_say(x, _ty), do: IO.puts(x)
   def cuni_mod(a, b), do: Integer.mod(a, b)
+
+  # dec (docs/DECIMAL.md §3, §6): scaled integer, scale 10^4. Elixir
+  # integers are bignum, so the envelope is unbounded. div truncates
+  # toward zero (CuNi); division by zero raises.
+  def cuni_dec_mul(a, b), do: div(a * b, 10000)
+  def cuni_dec_div(_a, 0), do: raise("cuni: dec division by zero")
+  def cuni_dec_div(a, b), do: div(a * 10000, b)
+  def cuni_dec_str(v) do
+    s = if v < 0, do: "-", else: ""
+    a = abs(v)
+    ip = div(a, 10000)
+    fr = rem(a, 10000)
+    fs = :io_lib.format("~4..0B", [fr]) |> IO.iodata_to_binary() |> String.trim_trailing("0")
+    fs = if fs == "", do: "0", else: fs
+    s <> Integer.to_string(ip) <> "." <> fs
+  end
 
 "#;
 
@@ -282,6 +301,9 @@ impl Gen {
             Ty::Int => ":int",
             Ty::Str => ":str",
             Ty::Bool => ":bool",
+            // `dec` is a scaled integer (docs/DECIMAL.md, scale 10^4);
+            // Elixir integers are bignum, so the envelope is unbounded.
+            Ty::Dec => ":dec",
         }
     }
 
@@ -291,7 +313,7 @@ impl Gen {
             ExprKind::Bool(b) => Ok((if *b { "true" } else { "false" }.to_string(), Ty::Bool)),
             ExprKind::Str(s) => Ok((ex_str(s), Ty::Str)),
             ExprKind::Float(_) => Err("float: beyond core subset; refusing".into()),
-            ExprKind::Dec(_) => Err("dec: beyond core subset; refusing".into()),
+            ExprKind::Dec(v) => Ok((v.to_string(), Ty::Dec)),
             ExprKind::Time(_) => Err("time: beyond core subset; refusing".into()),
             ExprKind::NoneLit => Err("none: beyond core subset; refusing".into()),
             ExprKind::Ident(n) => lookup(env, n),
@@ -330,23 +352,39 @@ impl Gen {
                             (format!("({} <> {})", l, r), Ty::Str)
                         } else if lt == Ty::Int && rt == Ty::Int {
                             (format!("({} + {})", l, r), Ty::Int)
+                        } else if lt == Ty::Dec && rt == Ty::Dec {
+                            (format!("({} + {})", l, r), Ty::Dec)
                         } else {
                             return Err("mixed-type `+`: beyond core subset; refusing".into());
                         }
                     }
                     BinOp::Sub => {
-                        Self::ints(lt, rt, "-")?;
-                        (format!("({} - {})", l, r), Ty::Int)
+                        let pair = Self::nums(lt, rt, "-")?;
+                        (format!("({} - {})", l, r), pair)
                     }
                     BinOp::Mul => {
-                        Self::ints(lt, rt, "*")?;
-                        (format!("({} * {})", l, r), Ty::Int)
+                        let pair = Self::nums(lt, rt, "*")?;
+                        if pair == Ty::Dec {
+                            // trunc(a*b/10000) toward zero (DECIMAL.md §3).
+                            (format!("cuni_dec_mul({}, {})", l, r), Ty::Dec)
+                        } else {
+                            (format!("({} * {})", l, r), Ty::Int)
+                        }
                     }
                     BinOp::Div => {
-                        Self::ints(lt, rt, "/")?;
-                        (format!("div({}, {})", l, r), Ty::Int)
+                        let pair = Self::nums(lt, rt, "/")?;
+                        if pair == Ty::Dec {
+                            // trunc(a*10000/b) toward zero; b == 0 fails
+                            // loudly in the helper (DECIMAL.md §3).
+                            (format!("cuni_dec_div({}, {})", l, r), Ty::Dec)
+                        } else {
+                            (format!("div({}, {})", l, r), Ty::Int)
+                        }
                     }
                     BinOp::Mod => {
+                        if lt == Ty::Dec || rt == Ty::Dec {
+                            return Err("`%` is not defined on `dec`".into());
+                        }
                         Self::ints(lt, rt, "%")?;
                         (format!("Integer.mod({}, {})", l, r), Ty::Int)
                     }
@@ -395,10 +433,10 @@ impl Gen {
                         Ok((format!("(not {})", v), Ty::Bool))
                     }
                     UnOp::Neg => {
-                        if t != Ty::Int {
-                            return Err("unary `-` on non-int: beyond core subset; refusing".into());
+                        if t != Ty::Int && t != Ty::Dec {
+                            return Err("unary `-` on non-int/dec: beyond core subset; refusing".into());
                         }
-                        Ok((format!("(-{})", v), Ty::Int))
+                        Ok((format!("(-{})", v), t))
                     }
                 }
             }
@@ -411,6 +449,17 @@ impl Gen {
             return Err("condition must be bool; refusing".into());
         }
         Ok(v)
+    }
+
+    /// Int-or-Dec pair: returns the shared numeric type, refuses mixes.
+    fn nums(l: Ty, r: Ty, op: &str) -> Result<Ty, String> {
+        if l == Ty::Int && r == Ty::Int {
+            Ok(Ty::Int)
+        } else if l == Ty::Dec && r == Ty::Dec {
+            Ok(Ty::Dec)
+        } else {
+            Err(format!("`{}` on mixed types: beyond core subset; refusing", op))
+        }
     }
 
     fn ints(l: Ty, r: Ty, op: &str) -> Result<(), String> {
@@ -438,7 +487,7 @@ impl Gen {
     }
 
     fn ord(l: Ty, r: Ty, op: &str) -> Result<(), String> {
-        if (l == Ty::Int && r == Ty::Int) || (l == Ty::Str && r == Ty::Str) {
+        if l == r && (l == Ty::Int || l == Ty::Dec || l == Ty::Str) {
             Ok(())
         } else {
             Err(format!("`{}` across mismatched types: beyond core subset; refusing", op))

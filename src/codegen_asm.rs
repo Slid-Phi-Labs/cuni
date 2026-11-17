@@ -41,6 +41,7 @@ enum Ty {
     Int,
     Str,
     Bool,
+    Dec,
 }
 
 fn ty_of(ty: &Type) -> Result<Ty, String> {
@@ -48,6 +49,7 @@ fn ty_of(ty: &Type) -> Result<Ty, String> {
         Type::Named(n) if n == "int" => Ok(Ty::Int),
         Type::Named(n) if n == "str" => Ok(Ty::Str),
         Type::Named(n) if n == "bool" => Ok(Ty::Bool),
+        Type::Named(n) if n == "dec" => Ok(Ty::Dec),
         _ => Err("type beyond core subset; refusing".into()),
     }
 }
@@ -93,6 +95,14 @@ const HEADER: &str = "\
     .asciz \"True\"
 .Lcuni_false:
     .asciz \"False\"
+.Lfmt_dec:
+    .asciz \"%s%ld.%04ld\"
+.Lcuni_dec_minus:
+    .asciz \"-\"
+.Lcuni_dec_empty:
+    .asciz \"\"
+.Ldec_buf:
+    .space 32
 ";
 
 /// Helpers emitted once in `.text`: the seat's mini-runtime.
@@ -139,6 +149,111 @@ cuni_floormod:
     idiv rsi
     mov rax, rdx
     ret
+# dec (docs/DECIMAL.md §3, §6): scaled long, scale 10^4. Mul/div use the
+# 128-bit imul/idiv pair; idiv traps (#DE) exactly when the quotient
+# overflows 64 bits, and div traps on b == 0 via ud2 below. `/` truncates
+# toward zero (CuNi).
+# long cuni_dec_mul(long a, long b) -- trunc(a*b/10000)
+cuni_dec_mul:
+    mov rax, rdi
+    imul rsi
+    mov rcx, 10000
+    idiv rcx
+    ret
+# long cuni_dec_div(long a, long b) -- trunc(a*10000/b)
+cuni_dec_div:
+    test rsi, rsi
+    jz .Lcuni_dec_div_zero
+    mov rax, rdi
+    mov rcx, 10000
+    imul rcx
+    idiv rsi
+    ret
+.Lcuni_dec_div_zero:
+    ud2
+# char *cuni_dec_str(long v) -- canonical dec string in a static buffer
+cuni_dec_str:
+    push rbp
+    mov rbp, rsp
+    push rbx
+    push r12
+    push r13
+    sub rsp, 8
+    mov r12, rdi
+    mov rax, rdi
+    cqo
+    mov rcx, 10000
+    idiv rcx
+    mov rbx, rax
+    mov r13, rdx
+    mov rax, rbx
+    test rax, rax
+    jns .Lcuni_dec_str_ip_done
+    neg rax
+.Lcuni_dec_str_ip_done:
+    mov rbx, rax
+    mov rax, r13
+    test rax, rax
+    jns .Lcuni_dec_str_fr_done
+    neg rax
+.Lcuni_dec_str_fr_done:
+    mov r13, rax
+    lea rdi, .Ldec_buf[rip]
+    mov esi, 32
+    lea rdx, .Lfmt_dec[rip]
+    lea rcx, .Lcuni_dec_empty[rip]
+    test r12, r12
+    jns .Lcuni_dec_str_nosign
+    lea rcx, .Lcuni_dec_minus[rip]
+.Lcuni_dec_str_nosign:
+    mov r8, rbx
+    mov r9, r13
+    xor eax, eax
+    call snprintf
+    lea rdi, .Ldec_buf[rip]
+    call strlen
+    mov rbx, rax
+    lea r12, .Ldec_buf[rip]
+    xor ecx, ecx
+.Lcuni_dec_str_scan:
+    cmp byte ptr [r12 + rcx], '.'
+    je .Lcuni_dec_str_found
+    inc rcx
+    cmp rcx, rbx
+    jb .Lcuni_dec_str_scan
+.Lcuni_dec_str_found:
+    lea rax, [rcx + 2]
+.Lcuni_dec_str_strip:
+    cmp rbx, rax
+    jbe .Lcuni_dec_str_done
+    cmp byte ptr [r12 + rbx - 1], '0'
+    jne .Lcuni_dec_str_done
+    dec rbx
+    jmp .Lcuni_dec_str_strip
+.Lcuni_dec_str_done:
+    mov byte ptr [r12 + rbx], 0
+    mov rax, r12
+    add rsp, 8
+    pop r13
+    pop r12
+    pop rbx
+    pop rbp
+    ret
+# void cuni_say_dec(long x)
+cuni_say_dec:
+    sub rsp, 8
+    call cuni_dec_str
+    add rsp, 8
+    mov rsi, rax
+    lea rdi, .Lfmt_str[rip]
+    xor eax, eax
+    sub rsp, 8
+    call printf
+    add rsp, 8
+    ret
+# shared loud-overflow trap for dec add/sub/neg (jo lands here)
+.Lcuni_dec_ovf:
+    ud2
 # char *cuni_concat(char *a, char *b)  -- malloc'd a+b
 cuni_concat:
     push rbp
@@ -451,6 +566,7 @@ impl Emitter {
                         Ty::Int => "cuni_say_int",
                         Ty::Str => "cuni_say_str",
                         Ty::Bool => "cuni_say_bool",
+                        Ty::Dec => "cuni_say_dec",
                     };
                     // rsp is 16-aligned here (all expression pushes are
                     // balanced), so the call needs no adjustment.
@@ -485,7 +601,18 @@ impl Emitter {
                 Ok(Ty::Str)
             }
             ExprKind::Float(_) => Err("float: beyond core subset; refusing".into()),
-            ExprKind::Dec(_) => Err("dec: beyond core subset; refusing".into()),
+            ExprKind::Dec(v) => {
+                // Scaled integer (parser scaled once, ast.rs); narrow seats
+                // refuse out-of-envelope literals at emit (DECIMAL.md §7).
+                if *v > i64::MAX as i128 || *v < -(i64::MAX as i128) {
+                    return Err(format!(
+                        "dec literal `{v}` exceeds this seat's envelope (|scaled| <= {}); refusing",
+                        i64::MAX
+                    ));
+                }
+                out.push_str(&format!("    mov rax, {}\n", v));
+                Ok(Ty::Dec)
+            }
             ExprKind::Time(_) => Err("time: beyond core subset; refusing".into()),
             ExprKind::NoneLit => Err("none: beyond core subset; refusing".into()),
             ExprKind::Ident(n) => {
@@ -514,11 +641,15 @@ impl Emitter {
                         Ok(Ty::Bool)
                     }
                     UnOp::Neg => {
-                        if t != Ty::Int {
-                            return Err("unary `-` on non-int: beyond core subset; refusing".into());
+                        if t != Ty::Int && t != Ty::Dec {
+                            return Err("unary `-` on non-int/dec: beyond core subset; refusing".into());
                         }
                         out.push_str("    neg rax\n");
-                        Ok(Ty::Int)
+                        if t == Ty::Dec {
+                            // neg of the scaled MIN wraps; trap instead.
+                            out.push_str("    jo .Lcuni_dec_ovf\n");
+                        }
+                        Ok(t)
                     }
                 }
             }
@@ -650,6 +781,60 @@ impl Emitter {
         let lt = self.gen_expr(lhs, out)?;
         out.push_str("    push rax\n");
         let rt = self.gen_expr(rhs, out)?;
+        // dec pairs (docs/DECIMAL.md §3): + / - plain (trapping on
+        // overflow via jo), * / via helpers (trunc toward zero), %
+        // refused, comparisons on the scaled integers.
+        if lt == Ty::Dec && rt == Ty::Dec {
+            match op {
+                BinOp::Add => {
+                    out.push_str("    pop rcx\n");
+                    out.push_str("    add rax, rcx\n");
+                    out.push_str("    jo .Lcuni_dec_ovf\n");
+                    return Ok(Ty::Dec);
+                }
+                BinOp::Sub => {
+                    out.push_str("    pop rcx\n");
+                    out.push_str("    sub rcx, rax\n");
+                    out.push_str("    mov rax, rcx\n");
+                    out.push_str("    jo .Lcuni_dec_ovf\n");
+                    return Ok(Ty::Dec);
+                }
+                BinOp::Mul => {
+                    out.push_str("    mov rsi, rax\n");
+                    out.push_str("    pop rdi\n");
+                    out.push_str("    call cuni_dec_mul\n");
+                    return Ok(Ty::Dec);
+                }
+                BinOp::Div => {
+                    out.push_str("    mov rsi, rax\n");
+                    out.push_str("    pop rdi\n");
+                    out.push_str("    call cuni_dec_div\n");
+                    return Ok(Ty::Dec);
+                }
+                BinOp::Mod => return Err("`%` is not defined on `dec`".into()),
+                BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
+                    let setcc = match op {
+                        BinOp::Eq => "sete",
+                        BinOp::Ne => "setne",
+                        BinOp::Lt => "setl",
+                        BinOp::Gt => "setg",
+                        BinOp::Le => "setle",
+                        _ => "setge",
+                    };
+                    out.push_str("    pop rcx\n");
+                    out.push_str("    cmp rcx, rax\n");
+                    out.push_str(&format!("    {} al\n", setcc));
+                    out.push_str("    movzx rax, al\n");
+                    return Ok(Ty::Bool);
+                }
+                BinOp::And | BinOp::Or => unreachable!(),
+            }
+        }
+        // `dec` and `int` never mix (typeck refuses first; this is
+        // defense in depth).
+        if (lt == Ty::Dec) != (rt == Ty::Dec) {
+            return Err("mixed dec/int: beyond core subset; refusing".into());
+        }
         // rhs value is in rax; move lhs into rcx.
         match op {
             BinOp::Add if lt == Ty::Str && rt == Ty::Str => {

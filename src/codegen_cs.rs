@@ -151,7 +151,7 @@ const SPEC: LangSpec = LangSpec {
     // class via main_close. `S` is CuNi's `str`: C# has no `<`/`>`/`<=`/`>=`
     // on `string`, so the wrapper overloads all six comparisons (ordinal)
     // plus `+` concatenation; `ToString` keeps `say` printing the raw text.
-    header: "using System;\n\nstruct S {\n    public string v;\n    public S(string v) { this.v = v; }\n    public override string ToString() { return v; }\n    public static S operator +(S a, S b) { return new S(a.v + b.v); }\n    public static bool operator ==(S a, S b) { return a.v == b.v; }\n    public static bool operator !=(S a, S b) { return !(a == b); }\n    public static bool operator <(S a, S b) { return string.CompareOrdinal(a.v, b.v) < 0; }\n    public static bool operator >(S a, S b) { return string.CompareOrdinal(a.v, b.v) > 0; }\n    public static bool operator <=(S a, S b) { return string.CompareOrdinal(a.v, b.v) <= 0; }\n    public static bool operator >=(S a, S b) { return string.CompareOrdinal(a.v, b.v) >= 0; }\n}\n\nclass Program {\n    static void cuni_say(dynamic x, string ty) {\n        if (ty == \"bool\") { Console.WriteLine((bool)x ? \"True\" : \"False\"); }\n        else { Console.WriteLine(x); }\n    }\n    static dynamic cuni_mod(dynamic a, dynamic b) { return ((a % b) + b) % b; }\n",
+    header: "using System;\n\nstruct S {\n    public string v;\n    public S(string v) { this.v = v; }\n    public override string ToString() { return v; }\n    public static S operator +(S a, S b) { return new S(a.v + b.v); }\n    public static bool operator ==(S a, S b) { return a.v == b.v; }\n    public static bool operator !=(S a, S b) { return !(a == b); }\n    public static bool operator <(S a, S b) { return string.CompareOrdinal(a.v, b.v) < 0; }\n    public static bool operator >(S a, S b) { return string.CompareOrdinal(a.v, b.v) > 0; }\n    public static bool operator <=(S a, S b) { return string.CompareOrdinal(a.v, b.v) <= 0; }\n    public static bool operator >=(S a, S b) { return string.CompareOrdinal(a.v, b.v) >= 0; }\n}\n\nclass Program {\n    static void cuni_say(dynamic x, string ty) {\n        if (ty == \"bool\") { Console.WriteLine((bool)x ? \"True\" : \"False\"); }\n        else { Console.WriteLine(x); }\n    }\n    static dynamic cuni_mod(dynamic a, dynamic b) { return ((a % b) + b) % b; }\n    static long cuni_dec_mul(long a, long b) { return checked(a * b / 10000L); }\n    static long cuni_dec_div(long a, long b) { if (b == 0L) { throw new Exception(\"cuni: dec division by zero\"); } return checked(a * 10000L / b); }\n    static string cuni_dec_str(long v) { string sign = \"\"; if (v < 0L) { sign = \"-\"; v = -v; } long ip = v / 10000L; long fr = v % 10000L; long f = fr; long digits = 4L; while (f != 0L && f % 10L == 0L) { f /= 10L; digits--; } if (f == 0L) { digits = 1L; } string fs = f.ToString(); while (fs.Length < (int)digits) { fs = \"0\" + fs; } return sign + ip.ToString() + \".\" + fs; }\n",
     main_open: "    static void Main() {",
     main_close: "    }\n}",
     let_fmt: "dynamic {name} = {expr};",
@@ -173,6 +173,14 @@ const SPEC: LangSpec = LangSpec {
     int_div_helper: None,
     // C# `%` truncates like C; CuNi wants Python-floored.
     int_mod_helper: Some("cuni_mod"),
+    // dec (docs/DECIMAL.md §3, §6): long seat; checked() refuses overflow
+    // loudly, division by zero throws. Literals gain `L` from the
+    // long_literals post-pass, so no dec_lit_suffix is needed.
+    dec_mul_helper: Some("cuni_dec_mul"),
+    dec_div_helper: Some("cuni_dec_div"),
+    dec_str_helper: Some("cuni_dec_str"),
+    dec_lit_suffix: "",
+    dec_max_abs: Some(9_223_372_036_854_775_807),
     str_eq_op: "==",
     str_ne_op: "!=",
     str_lt_op: "<",

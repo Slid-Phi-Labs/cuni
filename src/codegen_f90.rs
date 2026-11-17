@@ -71,6 +71,7 @@ enum Ty {
     Int,
     Str,
     Bool,
+    Dec,
 }
 
 fn ty_of(ty: &Type) -> Result<Ty, String> {
@@ -78,6 +79,7 @@ fn ty_of(ty: &Type) -> Result<Ty, String> {
         Type::Named(n) if n == "int" => Ok(Ty::Int),
         Type::Named(n) if n == "str" => Ok(Ty::Str),
         Type::Named(n) if n == "bool" => Ok(Ty::Bool),
+        Type::Named(n) if n == "dec" => Ok(Ty::Dec),
         _ => Err("type beyond core subset; refusing".into()),
     }
 }
@@ -126,6 +128,8 @@ fn decl_of(name: &str, ty: Ty) -> String {
         Ty::Int => format!("integer(kind=8) :: {}", name),
         Ty::Str => format!("character(len=:), allocatable :: {}", name),
         Ty::Bool => format!("logical :: {}", name),
+        // `dec` is a scaled integer(kind=8) (docs/DECIMAL.md, scale 10^4).
+        Ty::Dec => format!("integer(kind=8) :: {}", name),
     }
 }
 
@@ -134,6 +138,7 @@ fn param_decl(name: &str, ty: Ty) -> String {
         Ty::Int => format!("integer(kind=8), value :: {}", name),
         Ty::Str => format!("character(len=*), intent(in) :: {}", name),
         Ty::Bool => format!("logical, value :: {}", name),
+        Ty::Dec => format!("integer(kind=8), value :: {}", name),
     }
 }
 
@@ -142,6 +147,7 @@ fn result_decl(ty: Ty) -> String {
         Ty::Int => "integer(kind=8) :: r".to_string(),
         Ty::Str => "character(len=:), allocatable :: r".to_string(),
         Ty::Bool => "logical :: r".to_string(),
+        Ty::Dec => "integer(kind=8) :: r".to_string(),
     }
 }
 
@@ -168,6 +174,67 @@ const HELPERS: &str = concat!(
     "      write(*, '(a)') 'False'\n",
     "    end if\n",
     "  end subroutine cuni_say_bool\n",
+    // dec (docs/DECIMAL.md §3, §6): scaled integer(kind=8), scale 10^4.
+    // Mul/div run through integer(kind=16) (gfortran 128-bit) and refuse
+    // loudly on overflow; division by zero stops loudly. Fortran `/`
+    // truncates toward zero (CuNi).
+    "  function cuni_dec_mul(a, b) result(r)\n",
+    "    integer(kind=8), value :: a\n",
+    "    integer(kind=8), value :: b\n",
+    "    integer(kind=8) :: r\n",
+    "    integer(kind=16) :: p\n",
+    "    p = int(a, kind=16) * int(b, kind=16) / 10000_16\n",
+    "    if (p > 9223372036854775807_16 .or. p < -9223372036854775807_16 - 1_16) then\n",
+    "      write(*, '(a)') 'cuni: dec multiplication overflow'\n",
+    "      stop 1\n",
+    "    end if\n",
+    "    r = int(p, kind=8)\n",
+    "  end function cuni_dec_mul\n",
+    "  function cuni_dec_div(a, b) result(r)\n",
+    "    integer(kind=8), value :: a\n",
+    "    integer(kind=8), value :: b\n",
+    "    integer(kind=8) :: r\n",
+    "    integer(kind=16) :: p\n",
+    "    if (b == 0_8) then\n",
+    "      write(*, '(a)') 'cuni: dec division by zero'\n",
+    "      stop 1\n",
+    "    end if\n",
+    "    p = int(a, kind=16) * 10000_16 / int(b, kind=16)\n",
+    "    if (p > 9223372036854775807_16 .or. p < -9223372036854775807_16 - 1_16) then\n",
+    "      write(*, '(a)') 'cuni: dec division overflow'\n",
+    "      stop 1\n",
+    "    end if\n",
+    "    r = int(p, kind=8)\n",
+    "  end function cuni_dec_div\n",
+    "  function cuni_dec_str(v) result(s)\n",
+    "    integer(kind=8), value :: v\n",
+    "    character(len=32) :: s\n",
+    "    integer(kind=8) :: a, ip, fr, n\n",
+    "    character(len=32) :: ipstr\n",
+    "    character(len=4) :: fs4\n",
+    "    if (v < 0_8) then\n",
+    "      a = -v\n",
+    "    else\n",
+    "      a = v\n",
+    "    end if\n",
+    "    ip = a / 10000_8\n",
+    "    fr = mod(a, 10000_8)\n",
+    "    write(fs4, '(i4.4)') fr\n",
+    "    n = 4\n",
+    "    do while (n > 1 .and. fs4(n:n) == '0')\n",
+    "      n = n - 1\n",
+    "    end do\n",
+    "    write(ipstr, '(i0)') ip\n",
+    "    if (v < 0_8) then\n",
+    "      s = '-' // trim(ipstr) // '.' // fs4(1:n)\n",
+    "    else\n",
+    "      s = trim(ipstr) // '.' // fs4(1:n)\n",
+    "    end if\n",
+    "  end function cuni_dec_str\n",
+    "  subroutine cuni_say_dec(x)\n",
+    "    integer(kind=8), value :: x\n",
+    "    write(*, '(a)') trim(cuni_dec_str(x))\n",
+    "  end subroutine cuni_say_dec\n",
 );
 
 /// One scoping unit (the main program or one function): declarations are
@@ -583,6 +650,7 @@ impl Emitter {
                                     Ty::Int => "cuni_say_int",
                                     Ty::Str => "cuni_say_str",
                                     Ty::Bool => "cuni_say_bool",
+                                    Ty::Dec => "cuni_say_dec",
                                 };
                                 self.unit.bl(&format!("call {}({})", helper, v));
                                 return Ok(());
@@ -610,7 +678,17 @@ impl Emitter {
             )),
             ExprKind::Str(s) => Ok((f90_str(s), Ty::Str)),
             ExprKind::Float(_) => Err("float: beyond core subset; refusing".into()),
-            ExprKind::Dec(_) => Err("dec: beyond core subset; refusing".into()),
+            ExprKind::Dec(v) => {
+                // Scaled integer (parser scaled once, ast.rs); narrow seats
+                // refuse out-of-envelope literals at emit (DECIMAL.md §7).
+                if *v > i64::MAX as i128 || *v < -(i64::MAX as i128) {
+                    return Err(format!(
+                        "dec literal `{v}` exceeds this seat's envelope (|scaled| <= {}); refusing",
+                        i64::MAX
+                    ));
+                }
+                Ok((format!("{}_8", v), Ty::Dec))
+            }
             ExprKind::Time(_) => Err("time: beyond core subset; refusing".into()),
             ExprKind::NoneLit => Err("none: beyond core subset; refusing".into()),
             ExprKind::Ident(n) => {
@@ -652,29 +730,52 @@ impl Emitter {
             ExprKind::Binary { op, lhs, rhs } => {
                 let (l, lt) = self.gen_expr(lhs)?;
                 let (r, rt) = self.gen_expr(rhs)?;
+                // `dec` and `int` never mix (typeck refuses first; this is
+                // defense in depth).
+                if matches!(op, BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge)
+                    && ((lt == Ty::Dec) != (rt == Ty::Dec))
+                {
+                    return Err(
+                        "mixed dec/int comparison: beyond core subset; refusing".into(),
+                    );
+                }
                 match op {
                     BinOp::Add => {
                         if lt == Ty::Str && rt == Ty::Str {
                             return Ok((format!("({} // {})", l, r), Ty::Str));
                         } else if lt == Ty::Int && rt == Ty::Int {
                             return Ok((format!("({} + {})", l, r), Ty::Int));
+                        } else if lt == Ty::Dec && rt == Ty::Dec {
+                            return Ok((format!("({} + {})", l, r), Ty::Dec));
                         }
                         return Err("mixed-type `+`: beyond core subset; refusing".into());
                     }
                     BinOp::Sub => {
-                        require_ints(lt, rt, "-")?;
-                        Ok((format!("({} - {})", l, r), Ty::Int))
+                        let pair = require_nums(lt, rt, "-")?;
+                        Ok((format!("({} - {})", l, r), pair))
                     }
                     BinOp::Mul => {
-                        require_ints(lt, rt, "*")?;
+                        let pair = require_nums(lt, rt, "*")?;
+                        if pair == Ty::Dec {
+                            // trunc(a*b/10000) toward zero (DECIMAL.md §3).
+                            return Ok((format!("cuni_dec_mul({}, {})", l, r), Ty::Dec));
+                        }
                         Ok((format!("({} * {})", l, r), Ty::Int))
                     }
                     BinOp::Div => {
-                        require_ints(lt, rt, "/")?;
+                        let pair = require_nums(lt, rt, "/")?;
+                        if pair == Ty::Dec {
+                            // trunc(a*10000/b) toward zero; b == 0 fails
+                            // loudly in the helper (DECIMAL.md §3).
+                            return Ok((format!("cuni_dec_div({}, {})", l, r), Ty::Dec));
+                        }
                         // Native Fortran integer division truncates toward zero.
                         Ok((format!("({} / {})", l, r), Ty::Int))
                     }
                     BinOp::Mod => {
+                        if lt == Ty::Dec || rt == Ty::Dec {
+                            return Err("`%` is not defined on `dec`".into());
+                        }
                         require_ints(lt, rt, "%")?;
                         // Fortran's mod truncates; the helper floors.
                         Ok((format!("cuni_mod({}, {})", l, r), Ty::Int))
@@ -705,14 +806,24 @@ impl Emitter {
                         Ok((format!("(.not. {})", v), Ty::Bool))
                     }
                     UnOp::Neg => {
-                        if t != Ty::Int {
-                            return Err("unary `-` on non-int: beyond core subset; refusing".into());
+                        if t != Ty::Int && t != Ty::Dec {
+                            return Err("unary `-` on non-int/dec: beyond core subset; refusing".into());
                         }
-                        Ok((format!("(-{})", v), Ty::Int))
+                        Ok((format!("(-{})", v), t))
                     }
                 }
             }
         }
+    }
+}
+
+fn require_nums(l: Ty, r: Ty, op: &str) -> Result<Ty, String> {
+    if l == Ty::Int && r == Ty::Int {
+        Ok(Ty::Int)
+    } else if l == Ty::Dec && r == Ty::Dec {
+        Ok(Ty::Dec)
+    } else {
+        Err(format!("`{}` on mixed types: beyond core subset; refusing", op))
     }
 }
 

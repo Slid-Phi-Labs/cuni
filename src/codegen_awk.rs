@@ -32,7 +32,7 @@ fn awk_str(s: &str) -> String {
 
 const SPEC: LangSpec = LangSpec {
     comment: "#",
-    header: "function cuni_div(a, b) { return int(a / b); }\nfunction cuni_mod(a, b) { return (a % b + b) % b; }\nfunction cuni_say(x, ty) {\n    if (ty == \"bool\") { print (x ? \"True\" : \"False\"); }\n    else { print x; }\n}\n",
+    header: "function cuni_div(a, b) { return int(a / b); }\nfunction cuni_mod(a, b) { return (a % b + b) % b; }\nfunction cuni_say(x, ty) {\n    if (ty == \"bool\") { print (x ? \"True\" : \"False\"); }\n    else { print x; }\n}\nfunction cuni_dec_mul(a, b) { return int(a * b / 10000); }\nfunction cuni_dec_div(a, b) { if (b == 0) { print \"cuni: dec division by zero\" > \"/dev/stderr\"; exit 1; } return int(a * 10000 / b); }\nfunction cuni_dec_str(v,    sign, ip, fr, fs) {\n    sign = \"\"; if (v < 0) { sign = \"-\"; v = -v; }\n    ip = int(v / 10000); fr = v % 10000;\n    fs = sprintf(\"%04d\", fr);\n    while (substr(fs, length(fs), 1) == \"0\") { fs = substr(fs, 1, length(fs) - 1); }\n    if (fs == \"\") { fs = \"0\"; }\n    return sign ip \".\" fs;\n}\n",
     main_open: "BEGIN {",
     main_close: "}",
     let_fmt: "{name} = {expr};",
@@ -54,6 +54,13 @@ const SPEC: LangSpec = LangSpec {
     int_div_helper: Some("cuni_div"),
     // awk `%` truncates like C; CuNi wants Python-floored.
     int_mod_helper: Some("cuni_mod"),
+    // dec (docs/DECIMAL.md §3, §6): scaled-int helpers; double seat, so
+    // literals are envelope-checked against 2^53 (exact-int range).
+    dec_mul_helper: Some("cuni_dec_mul"),
+    dec_div_helper: Some("cuni_dec_div"),
+    dec_str_helper: Some("cuni_dec_str"),
+    dec_lit_suffix: "",
+    dec_max_abs: Some(9_007_199_254_740_992),
     // awk compares string constants lexicographically with these operators.
     str_eq_op: "==",
     str_ne_op: "!=",

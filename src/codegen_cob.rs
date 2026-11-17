@@ -37,6 +37,9 @@ enum Ty {
     Int,
     Str,
     Bool,
+    /// Scaled decimal (x10000, DECIMAL.md): stored as a signed 64-bit
+    /// integer in a PIC S9(19) item, envelope |scaled| <= i64::MAX.
+    Dec,
 }
 
 fn ty_of(ty: &Type) -> Result<Ty, String> {
@@ -44,6 +47,7 @@ fn ty_of(ty: &Type) -> Result<Ty, String> {
         Type::Named(n) if n == "int" => Ok(Ty::Int),
         Type::Named(n) if n == "str" => Ok(Ty::Str),
         Type::Named(n) if n == "bool" => Ok(Ty::Bool),
+        Type::Named(n) if n == "dec" => Ok(Ty::Dec),
         _ => Err("type beyond core subset; refusing".into()),
     }
 }
@@ -106,6 +110,7 @@ enum Place {
     Int(String),
     Bool(String),
     Str(String, String),
+    Dec(String),
 }
 
 impl Place {
@@ -114,6 +119,7 @@ impl Place {
             Place::Int(_) => Ty::Int,
             Place::Bool(_) => Ty::Bool,
             Place::Str(_, _) => Ty::Str,
+            Place::Dec(_) => Ty::Dec,
         }
     }
 }
@@ -123,6 +129,291 @@ const MAX_BOOL_TEMPS: u32 = 500;
 const MAX_STR_TEMPS: u32 = 200;
 const STR_BUF: usize = 4096;
 const MAX_FRAMES: u32 = 1024;
+
+/// Dec arithmetic paragraphs, appended after the defs. Exactness notes:
+/// * Mul: a*b/10000 split as (aq*b) + (ar*bq) + (ar*br/10000) with
+///   aq=a/10000, ar=a-aq*10000 (same for b). Every term is <= 19 digits
+///   by construction (aq guard first: |aq| <= max/|b|), and all three
+///   terms share the sign of a*b, so |result| = |t1|+|t2|+|t3|; the
+///   m1 > lim2 check (negative side allows |total| <= max+1) is the
+///   exact overflow gate, plus a final envelope check on the sum.
+/// * Div: a*10000/b split as q*10000 + trunc(r*10000/b), q=a/b, r=a-q*b.
+///   Small |b| (<= max/10000): r*10000 fits, one COMPUTE. Large |b|:
+///   b=d*10000+e, r=s*d+rd, correction f=(rd*10000-s*e)/b in
+///   (-1.000001, 1.000001); term2 = s + g + adj where g = sign(f)
+///   when |f| >= 1 and adj rounds s toward f when f is fractional.
+///   COBOL holds |b| = 2^63 exactly (PIC S9(19)), so no MIN sentinel
+///   is needed: thr = |b| - |y| directly.
+/// * DIVIDE ... GIVING is always fed a scratch copy (ATMP/BTMP/RTMP):
+///   the standard leaves whether the dividend is preserved
+///   implementation-defined, and every dividend here is reused.
+/// * Say: canonical print (DECIMAL.md §7) — integer part via an edited
+///   picture with zero suppression, frac zero-padded to 4 then trailing
+///   zeros stripped keeping one digit, sign emitted separately.
+const DEC_PARAS: &str = r#"CUNI-DEC-MUL.
+    IF CUNI-DM-A = 0 OR CUNI-DM-B = 0
+        MOVE 0 TO CUNI-DM-RES
+    ELSE
+        MOVE CUNI-DM-A TO CUNI-DM-ATMP
+        DIVIDE CUNI-DM-K INTO CUNI-DM-ATMP GIVING CUNI-DM-AQ
+        COMPUTE CUNI-DM-AR = CUNI-DM-A - CUNI-DM-AQ * CUNI-DM-K
+        MOVE CUNI-DM-B TO CUNI-DM-BTMP
+        DIVIDE CUNI-DM-K INTO CUNI-DM-BTMP GIVING CUNI-DM-BQ
+        COMPUTE CUNI-DM-BR = CUNI-DM-B - CUNI-DM-BQ * CUNI-DM-K
+        IF CUNI-DM-B < 0
+            COMPUTE CUNI-DM-AB2 = 0 - CUNI-DM-B
+        ELSE
+            MOVE CUNI-DM-B TO CUNI-DM-AB2
+        END-IF
+        MOVE CUNI-DM-MAX TO CUNI-DM-MAXTMP
+        DIVIDE CUNI-DM-AB2 INTO CUNI-DM-MAXTMP GIVING CUNI-DM-LIM
+        IF CUNI-DM-AQ < 0
+            COMPUTE CUNI-DM-AAQ = 0 - CUNI-DM-AQ
+        ELSE
+            MOVE CUNI-DM-AQ TO CUNI-DM-AAQ
+        END-IF
+        IF CUNI-DM-AAQ > CUNI-DM-LIM
+            DISPLAY "cuni: dec multiplication overflow"
+            STOP RUN RETURNING 1
+        END-IF
+        COMPUTE CUNI-DM-T1 = CUNI-DM-AQ * CUNI-DM-B
+            ON SIZE ERROR
+                DISPLAY "cuni: dec multiplication overflow"
+                STOP RUN RETURNING 1
+        END-COMPUTE
+        COMPUTE CUNI-DM-T2 = CUNI-DM-AR * CUNI-DM-BQ
+            ON SIZE ERROR
+                DISPLAY "cuni: dec multiplication overflow"
+                STOP RUN RETURNING 1
+        END-COMPUTE
+        COMPUTE CUNI-DM-T3 = CUNI-DM-AR * CUNI-DM-BR / CUNI-DM-K
+            ON SIZE ERROR
+                DISPLAY "cuni: dec multiplication overflow"
+                STOP RUN RETURNING 1
+        END-COMPUTE
+        IF CUNI-DM-T1 < 0
+            COMPUTE CUNI-DM-M1 = 0 - CUNI-DM-T1
+        ELSE
+            MOVE CUNI-DM-T1 TO CUNI-DM-M1
+        END-IF
+        IF CUNI-DM-T2 < 0
+            COMPUTE CUNI-DM-M2 = 0 - CUNI-DM-T2
+        ELSE
+            MOVE CUNI-DM-T2 TO CUNI-DM-M2
+        END-IF
+        IF CUNI-DM-T3 < 0
+            COMPUTE CUNI-DM-M3 = 0 - CUNI-DM-T3
+        ELSE
+            MOVE CUNI-DM-T3 TO CUNI-DM-M3
+        END-IF
+        COMPUTE CUNI-DM-LIM2 = 9223372036854775807 - CUNI-DM-M2 - CUNI-DM-M3
+        IF (CUNI-DM-A < 0 AND CUNI-DM-B >= 0) OR (CUNI-DM-A >= 0 AND CUNI-DM-B < 0)
+            IF CUNI-DM-M2 > 0 OR CUNI-DM-M3 > 0
+                ADD 1 TO CUNI-DM-LIM2
+            END-IF
+        END-IF
+        IF CUNI-DM-M1 > CUNI-DM-LIM2
+            DISPLAY "cuni: dec multiplication overflow"
+            STOP RUN RETURNING 1
+        END-IF
+        COMPUTE CUNI-DM-RES = CUNI-DM-T1 + CUNI-DM-T2 + CUNI-DM-T3
+            ON SIZE ERROR
+                DISPLAY "cuni: dec multiplication overflow"
+                STOP RUN RETURNING 1
+        END-COMPUTE
+        IF CUNI-DM-RES > 9223372036854775807
+            OR CUNI-DM-RES < -9223372036854775807
+            DISPLAY "cuni: dec multiplication overflow"
+            STOP RUN RETURNING 1
+        END-IF
+    END-IF.
+CUNI-DEC-DIV.
+    IF CUNI-DD-B = 0
+        DISPLAY "cuni: dec division by zero"
+        STOP RUN RETURNING 1
+    ELSE
+        IF CUNI-DD-A = -9223372036854775808 AND CUNI-DD-B = -1
+            DISPLAY "cuni: dec division overflow"
+            STOP RUN RETURNING 1
+        ELSE
+            MOVE CUNI-DD-A TO CUNI-DD-ATMP
+            DIVIDE CUNI-DD-B INTO CUNI-DD-ATMP GIVING CUNI-DD-Q
+            COMPUTE CUNI-DD-R = CUNI-DD-A - CUNI-DD-Q * CUNI-DD-B
+            IF CUNI-DD-Q > 922337203685477
+                OR CUNI-DD-Q < -922337203685477
+                DISPLAY "cuni: dec division overflow"
+                STOP RUN RETURNING 1
+            ELSE
+                COMPUTE CUNI-DD-T1 = CUNI-DD-Q * CUNI-DD-K
+                    ON SIZE ERROR
+                        DISPLAY "cuni: dec division overflow"
+                        STOP RUN RETURNING 1
+                END-COMPUTE
+                IF CUNI-DD-B > 922337203685477
+                    OR CUNI-DD-B < -922337203685477
+                    MOVE CUNI-DD-B TO CUNI-DD-BTMP
+                    DIVIDE CUNI-DD-K INTO CUNI-DD-BTMP GIVING CUNI-DD-D
+                    COMPUTE CUNI-DD-E = CUNI-DD-B - CUNI-DD-D * CUNI-DD-K
+                    MOVE CUNI-DD-R TO CUNI-DD-RTMP
+                    DIVIDE CUNI-DD-D INTO CUNI-DD-RTMP GIVING CUNI-DD-S
+                    COMPUTE CUNI-DD-RD = CUNI-DD-R - CUNI-DD-S * CUNI-DD-D
+                    COMPUTE CUNI-DD-X = CUNI-DD-RD * CUNI-DD-K
+                    COMPUTE CUNI-DD-Y = CUNI-DD-S * CUNI-DD-E
+                    IF CUNI-DD-X < 0
+                        COMPUTE CUNI-DD-AX = 0 - CUNI-DD-X
+                    ELSE
+                        MOVE CUNI-DD-X TO CUNI-DD-AX
+                    END-IF
+                    IF CUNI-DD-Y < 0
+                        COMPUTE CUNI-DD-AY = 0 - CUNI-DD-Y
+                    ELSE
+                        MOVE CUNI-DD-Y TO CUNI-DD-AY
+                    END-IF
+                    IF CUNI-DD-B < 0
+                        COMPUTE CUNI-DD-AB = 0 - CUNI-DD-B
+                    ELSE
+                        MOVE CUNI-DD-B TO CUNI-DD-AB
+                    END-IF
+                    COMPUTE CUNI-DD-THR = CUNI-DD-AB - CUNI-DD-AY
+                    IF (CUNI-DD-X >= 0 AND CUNI-DD-Y >= 0)
+                        OR (CUNI-DD-X < 0 AND CUNI-DD-Y < 0)
+                        MOVE 1 TO CUNI-DD-SAME
+                    ELSE
+                        MOVE 0 TO CUNI-DD-SAME
+                    END-IF
+                    MOVE 0 TO CUNI-DD-GE
+                    MOVE 0 TO CUNI-DD-FZERO
+                    MOVE 0 TO CUNI-DD-FPOS
+                    MOVE 0 TO CUNI-DD-FINT
+                    IF CUNI-DD-SAME = 1
+                        IF CUNI-DD-X = CUNI-DD-Y
+                            MOVE 1 TO CUNI-DD-FZERO
+                        ELSE
+                            IF CUNI-DD-AX > CUNI-DD-AY
+                                IF CUNI-DD-X > 0
+                                    MOVE 1 TO CUNI-DD-WS
+                                ELSE
+                                    MOVE 0 TO CUNI-DD-WS
+                                END-IF
+                            ELSE
+                                IF CUNI-DD-Y < 0
+                                    MOVE 1 TO CUNI-DD-WS
+                                ELSE
+                                    MOVE 0 TO CUNI-DD-WS
+                                END-IF
+                            END-IF
+                            IF (CUNI-DD-WS = 1 AND CUNI-DD-B >= 0)
+                                OR (CUNI-DD-WS = 0 AND CUNI-DD-B < 0)
+                                MOVE 1 TO CUNI-DD-FPOS
+                            END-IF
+                        END-IF
+                    ELSE
+                        IF CUNI-DD-AX >= CUNI-DD-THR
+                            MOVE 1 TO CUNI-DD-GE
+                        END-IF
+                        IF (CUNI-DD-X >= 0 AND CUNI-DD-B >= 0)
+                            OR (CUNI-DD-X < 0 AND CUNI-DD-B < 0)
+                            MOVE 1 TO CUNI-DD-FPOS
+                        END-IF
+                        IF CUNI-DD-GE = 1
+                            IF CUNI-DD-AX = CUNI-DD-THR
+                                MOVE 1 TO CUNI-DD-FINT
+                            END-IF
+                        END-IF
+                    END-IF
+                    MOVE 0 TO CUNI-DD-G
+                    IF CUNI-DD-GE = 1
+                        IF CUNI-DD-FPOS = 1
+                            MOVE 1 TO CUNI-DD-G
+                        ELSE
+                            MOVE -1 TO CUNI-DD-G
+                        END-IF
+                    END-IF
+                    MOVE 0 TO CUNI-DD-ADJ
+                    IF CUNI-DD-FZERO = 0 AND CUNI-DD-FINT = 0
+                        IF CUNI-DD-FPOS = 1 AND CUNI-DD-S < 0
+                            MOVE 1 TO CUNI-DD-ADJ
+                        ELSE
+                            IF CUNI-DD-FPOS = 0 AND CUNI-DD-S > 0
+                                MOVE -1 TO CUNI-DD-ADJ
+                            END-IF
+                        END-IF
+                    END-IF
+                    COMPUTE CUNI-DD-T2 = CUNI-DD-S + CUNI-DD-G + CUNI-DD-ADJ
+                ELSE
+                    COMPUTE CUNI-DD-T2 = CUNI-DD-R * CUNI-DD-K / CUNI-DD-B
+                        ON SIZE ERROR
+                            DISPLAY "cuni: dec division overflow"
+                            STOP RUN RETURNING 1
+                    END-COMPUTE
+                END-IF
+                IF CUNI-DD-T1 < 0
+                    COMPUTE CUNI-DD-M1 = 0 - CUNI-DD-T1
+                ELSE
+                    MOVE CUNI-DD-T1 TO CUNI-DD-M1
+                END-IF
+                IF CUNI-DD-T2 < 0
+                    COMPUTE CUNI-DD-M2 = 0 - CUNI-DD-T2
+                ELSE
+                    MOVE CUNI-DD-T2 TO CUNI-DD-M2
+                END-IF
+                COMPUTE CUNI-DD-LIM = 9223372036854775807 - CUNI-DD-M2
+                IF (CUNI-DD-A < 0 AND CUNI-DD-B >= 0)
+                    OR (CUNI-DD-A >= 0 AND CUNI-DD-B < 0)
+                    IF CUNI-DD-M2 > 0
+                        ADD 1 TO CUNI-DD-LIM
+                    END-IF
+                END-IF
+                IF CUNI-DD-M1 > CUNI-DD-LIM
+                    DISPLAY "cuni: dec division overflow"
+                    STOP RUN RETURNING 1
+                END-IF
+                COMPUTE CUNI-DD-RES = CUNI-DD-T1 + CUNI-DD-T2
+                    ON SIZE ERROR
+                        DISPLAY "cuni: dec division overflow"
+                        STOP RUN RETURNING 1
+                END-COMPUTE
+                IF CUNI-DD-RES > 9223372036854775807
+                    OR CUNI-DD-RES < -9223372036854775807
+                    DISPLAY "cuni: dec division overflow"
+                    STOP RUN RETURNING 1
+                END-IF
+            END-IF
+        END-IF
+    END-IF.
+CUNI-DEC-SAY.
+    MOVE 0 TO CUNI-DS-NEG.
+    IF CUNI-DS-V < 0
+        MOVE 1 TO CUNI-DS-NEG
+        COMPUTE CUNI-DS-I = 0 - CUNI-DS-V
+    ELSE
+        MOVE CUNI-DS-V TO CUNI-DS-I
+    END-IF.
+    MOVE CUNI-DS-I TO CUNI-DS-ITMP.
+    DIVIDE CUNI-DS-K INTO CUNI-DS-ITMP GIVING CUNI-DS-AI.
+    COMPUTE CUNI-DS-AF = CUNI-DS-I - CUNI-DS-AI * CUNI-DS-K.
+    MOVE CUNI-DS-AI TO CUNI-DS-IE.
+    MOVE CUNI-DS-AF TO CUNI-DS-F4.
+    MOVE CUNI-DS-F4 TO CUNI-DS-FS.
+    MOVE 4 TO CUNI-DS-FSL.
+    PERFORM UNTIL CUNI-DS-FSL = 1
+        OR CUNI-DS-FS(CUNI-DS-FSL:1) NOT = "0"
+        SUBTRACT 1 FROM CUNI-DS-FSL
+    END-PERFORM.
+    MOVE SPACES TO CUNI-DS-BUF.
+    STRING
+        FUNCTION TRIM(CUNI-DS-IE LEADING) DELIMITED BY SIZE
+        "." DELIMITED BY SIZE
+        CUNI-DS-FS(1:CUNI-DS-FSL) DELIMITED BY SIZE
+        INTO CUNI-DS-BUF
+    END-STRING.
+    IF CUNI-DS-NEG = 1
+        DISPLAY "-" FUNCTION TRIM(CUNI-DS-BUF)
+    ELSE
+        DISPLAY FUNCTION TRIM(CUNI-DS-BUF)
+    END-IF.
+"#;
+
 
 struct Emitter {
     /// def name -> (params, ret). Fully populated before any body is walked.
@@ -227,6 +518,7 @@ impl Emitter {
                     self.frame_ref(f, name, false),
                     self.frame_ref(f, name, true),
                 )),
+                Some(Ty::Dec) => Ok(Place::Dec(self.frame_ref(f, name, false))),
                 None => Err(format!("unknown variable `{name}`: refusing")),
             },
             None => match self.globals.get(name) {
@@ -236,6 +528,7 @@ impl Emitter {
                     format!("V-{}", cob_name(name)),
                     format!("V-{}-LEN", cob_name(name)),
                 )),
+                Some(Ty::Dec) => Ok(Place::Dec(format!("V-{}", cob_name(name)))),
                 None => Err(format!("unknown variable `{name}`: refusing")),
             },
         }
@@ -336,11 +629,23 @@ impl Emitter {
                         Ok(Ty::Str)
                     } else if l == Ty::Int && r == Ty::Int {
                         Ok(Ty::Int)
+                    } else if l == Ty::Dec && r == Ty::Dec {
+                        Ok(Ty::Dec)
                     } else {
                         Err("mixed-type `+`: beyond core subset; refusing".into())
                     }
                 }
-                BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
+                BinOp::Sub | BinOp::Mul | BinOp::Div => {
+                    if self.infer(lhs)? == Ty::Dec && self.infer(rhs)? == Ty::Dec {
+                        Ok(Ty::Dec)
+                    } else {
+                        self.require_ints(lhs, rhs, op_name(op))?;
+                        Ok(Ty::Int)
+                    }
+                }
+                BinOp::Mod => {
+                    // `%` is refused on dec (no dec modulo in the core
+                    // semantics); require_ints rejects a Dec operand.
                     self.require_ints(lhs, rhs, op_name(op))?;
                     Ok(Ty::Int)
                 }
@@ -365,14 +670,16 @@ impl Emitter {
                 Ok(Ty::Bool)
             }
             ExprKind::Unary { op: UnOp::Neg, expr } => {
-                if self.infer(expr)? != Ty::Int {
-                    return Err("unary `-` on non-int: beyond core subset; refusing".into());
+                let t = self.infer(expr)?;
+                if t == Ty::Int || t == Ty::Dec {
+                    Ok(t)
+                } else {
+                    return Err("unary `-` on non-numeric: beyond core subset; refusing".into());
                 }
-                Ok(Ty::Int)
             }
             ExprKind::Call { callee, .. } => Ok(self.call_head(callee)?.2),
             ExprKind::Float(_) => Err("float: beyond core subset; refusing".into()),
-            ExprKind::Dec(_) => Err("dec: beyond core subset; refusing".into()),
+            ExprKind::Dec(_) => Ok(Ty::Dec),
             ExprKind::Time(_) => Err("time: beyond core subset; refusing".into()),
             ExprKind::NoneLit => Err("none: beyond core subset; refusing".into()),
             ExprKind::InterpStr(_) => Err("interpolated string: beyond core subset; refusing".into()),
@@ -389,6 +696,14 @@ impl Emitter {
             Ok(())
         } else {
             Err(format!("`{op}` on non-int: beyond core subset; refusing"))
+        }
+    }
+
+    fn require_decs(&self, lhs: &Expr, rhs: &Expr, op: &str) -> Result<(), String> {
+        if self.infer(lhs)? == Ty::Dec && self.infer(rhs)? == Ty::Dec {
+            Ok(())
+        } else {
+            Err(format!("`{op}` on non-dec: beyond core subset; refusing"))
         }
     }
 
@@ -438,6 +753,10 @@ impl Emitter {
             match pt {
                 Ty::Int => {
                     let item = self.int_item(a.expr())?;
+                    self.ln(&format!("MOVE {item} TO {pg}."));
+                }
+                Ty::Dec => {
+                    let item = self.dec_item(a.expr())?;
                     self.ln(&format!("MOVE {item} TO {pg}."));
                 }
                 Ty::Bool => {
@@ -548,6 +867,131 @@ impl Emitter {
             IPlace::Expr(x) => {
                 let t = self.fresh_int()?;
                 self.ln(&format!("COMPUTE {t} = {x}."));
+                Ok(t)
+            }
+        }
+    }
+
+    /// Dec expression as an IPlace; setup statements are emitted inline.
+    /// Dec values are scaled integers (x10000). `+`/`-` are plain integer
+    /// ops on the scaled values (overflow checked at materialization);
+    /// `*`/`/` go through the CUNI-DEC-MUL / CUNI-DEC-DIV paragraphs,
+    /// which implement trunc(a*b/10000) / trunc(a*10000/b) exactly with
+    /// i64-range overflow refusal. `%` on dec is refused (no dec modulo
+    /// in the core semantics).
+    fn dec_expr(&mut self, e: &Expr) -> Result<IPlace, String> {
+        match &e.kind {
+            ExprKind::Dec(v) => {
+                // Scaled integer (parser scaled once, ast.rs); narrow seats
+                // refuse out-of-envelope literals at emit (DECIMAL.md §7).
+                if *v > i64::MAX as i128 || *v < -(i64::MAX as i128) {
+                    return Err(format!(
+                        "dec literal `{v}` exceeds this seat's envelope (|scaled| <= {}); refusing",
+                        i64::MAX
+                    ));
+                }
+                Ok(IPlace::Simple(v.to_string()))
+            }
+            ExprKind::Ident(n) => match self.place_of(n)? {
+                Place::Dec(p) => Ok(IPlace::Simple(p)),
+                _ => Err(format!("variable `{n}` is not a dec: beyond core subset; refusing")),
+            },
+            ExprKind::Binary { op, lhs, rhs } => match op {
+                BinOp::Add | BinOp::Sub => {
+                    self.require_decs(lhs, rhs, op_name(op))?;
+                    let l = self.dec_item(lhs)?;
+                    let r = self.dec_item(rhs)?;
+                    let o = match op {
+                        BinOp::Add => "+",
+                        BinOp::Sub => "-",
+                        _ => unreachable!(),
+                    };
+                    Ok(IPlace::Expr(format!("({l} {o} {r})")))
+                }
+                BinOp::Mul => {
+                    self.require_decs(lhs, rhs, "mul")?;
+                    let l = self.dec_item(lhs)?;
+                    let r = self.dec_item(rhs)?;
+                    self.ln(&format!("MOVE {l} TO CUNI-DM-A."));
+                    self.ln(&format!("MOVE {r} TO CUNI-DM-B."));
+                    self.ln("PERFORM CUNI-DEC-MUL.");
+                    let t = self.fresh_int()?;
+                    self.ln(&format!("MOVE CUNI-DM-RES TO {t}."));
+                    Ok(IPlace::Simple(t))
+                }
+                BinOp::Div => {
+                    self.require_decs(lhs, rhs, "div")?;
+                    let l = self.dec_item(lhs)?;
+                    let r = self.dec_item(rhs)?;
+                    self.ln(&format!("MOVE {l} TO CUNI-DD-A."));
+                    self.ln(&format!("MOVE {r} TO CUNI-DD-B."));
+                    self.ln("PERFORM CUNI-DEC-DIV.");
+                    let t = self.fresh_int()?;
+                    self.ln(&format!("MOVE CUNI-DD-RES TO {t}."));
+                    Ok(IPlace::Simple(t))
+                }
+                _ => Err(format!(
+                    "`{}` is not a dec operator: beyond core subset; refusing",
+                    op_name(op)
+                )),
+            },
+            ExprKind::Unary { op: UnOp::Neg, expr } => {
+                if self.infer(expr)? != Ty::Dec {
+                    return Err("unary `-` on non-dec: beyond core subset; refusing".into());
+                }
+                let v = self.dec_item(expr)?;
+                Ok(IPlace::Expr(format!("(0 - {v})")))
+            }
+            ExprKind::Unary { op: UnOp::Not, .. } => {
+                Err("`not` on non-dec: beyond core subset; refusing".into())
+            }
+            ExprKind::Call { callee, args } => {
+                let (name, params, ret) = self.call_head(callee)?;
+                if ret != Ty::Dec {
+                    return Err(format!(
+                        "call to `{name}` used as dec but returns otherwise; refusing"
+                    ));
+                }
+                self.call_args(&name, &params, args)?;
+                self.ln(&format!("PERFORM F-{0} THRU F-{0}-EXIT.", cob_name(&name)));
+                let t = self.fresh_int()?;
+                self.ln(&format!("MOVE CUNI-R-{} TO {t}.", cob_name(&name)));
+                Ok(IPlace::Simple(t))
+            }
+            _ => Err("non-dec expression in dec position: beyond core subset; refusing".into()),
+        }
+    }
+
+    /// Dec expression reduced to a plain data item. Inline `+`/`-`/neg
+    /// arithmetic materializes through a COMPUTE with ON SIZE ERROR plus
+    /// an explicit i64-envelope check: the temp is PIC S9(19), which
+    /// holds up to 10^19-1, past the i64 envelope.
+    fn dec_item(&mut self, e: &Expr) -> Result<String, String> {
+        match self.dec_expr(e)? {
+            IPlace::Simple(s) => Ok(s),
+            IPlace::Expr(x) => {
+                let t = self.fresh_int()?;
+                self.ln(&format!("COMPUTE {t} = {x}"));
+                self.level += 1;
+                self.scope += 1;
+                self.ln("ON SIZE ERROR");
+                self.level += 1;
+                self.scope += 1;
+                self.ln("DISPLAY \"cuni: dec overflow; refusing\".");
+                self.ln("STOP RUN RETURNING 1.");
+                self.level -= 1;
+                self.scope -= 1;
+                self.level -= 1;
+                self.scope -= 1;
+                self.ln("END-COMPUTE.");
+                self.ln(&format!("IF {t} > 9223372036854775807 OR {t} < -9223372036854775807"));
+                self.level += 1;
+                self.scope += 1;
+                self.ln("DISPLAY \"cuni: dec overflow; refusing\".");
+                self.ln("STOP RUN RETURNING 1.");
+                self.level -= 1;
+                self.scope -= 1;
+                self.ln("END-IF.");
                 Ok(t)
             }
         }
@@ -762,6 +1206,33 @@ impl Emitter {
             Ty::Int => {
                 let l = self.int_item(lhs)?;
                 let r = self.int_item(rhs)?;
+                let o = match op {
+                    BinOp::Eq => "=",
+                    BinOp::Ne => "NOT =",
+                    BinOp::Lt => "<",
+                    BinOp::Gt => ">",
+                    BinOp::Le => "<=",
+                    BinOp::Ge => ">=",
+                    _ => unreachable!(),
+                };
+                self.ln(&format!("IF {l} {o} {r}"));
+                self.level += 1;
+        self.scope += 1;
+                self.ln(&format!("MOVE 1 TO {out}."));
+                self.level -= 1;
+        self.scope -= 1;
+                self.ln("ELSE");
+                self.level += 1;
+        self.scope += 1;
+                self.ln(&format!("MOVE 0 TO {out}."));
+                self.level -= 1;
+        self.scope -= 1;
+                self.ln("END-IF.");
+                Ok(())
+            }
+            Ty::Dec => {
+                let l = self.dec_item(lhs)?;
+                let r = self.dec_item(rhs)?;
                 let o = match op {
                     BinOp::Eq => "=",
                     BinOp::Ne => "NOT =",
@@ -1013,6 +1484,14 @@ impl Emitter {
         Ok(())
     }
 
+    /// Dec store: dec_item already applies the overflow-checked
+    /// materialization, so this is a plain MOVE of the reduced item.
+    fn store_dec(&mut self, e: &Expr, out: &str) -> Result<(), String> {
+        let item = self.dec_item(e)?;
+        self.ln(&format!("MOVE {item} TO {out}."));
+        Ok(())
+    }
+
     /// Store a string expression into the (buffer, length) pair.
     fn store_str(&mut self, e: &Expr, ob: &str, ol: &str) -> Result<(), String> {
         let sp = self.str_expr(e)?;
@@ -1041,6 +1520,12 @@ impl Emitter {
                 let item = self.int_item(e)?;
                 self.ln(&format!("MOVE {item} TO CUNI-INT-EDIT."));
                 self.ln("DISPLAY FUNCTION TRIM(CUNI-INT-EDIT LEADING).");
+                Ok(())
+            }
+            Ty::Dec => {
+                let item = self.dec_item(e)?;
+                self.ln(&format!("MOVE {item} TO CUNI-DS-V."));
+                self.ln("PERFORM CUNI-DEC-SAY.");
                 Ok(())
             }
             Ty::Str => {
@@ -1086,6 +1571,7 @@ impl Emitter {
                 let place = self.bind(name, vt)?;
                 match place {
                     Place::Int(p) => self.store_int(value, &p)?,
+                    Place::Dec(p) => self.store_dec(value, &p)?,
                     Place::Bool(p) => self.gen_bool(value, &p)?,
                     Place::Str(b, l) => self.store_str(value, &b, &l)?,
                 }
@@ -1097,6 +1583,7 @@ impl Emitter {
                 let place = self.bind(name, vt)?;
                 match place {
                     Place::Int(p) => self.store_int(value, &p)?,
+                    Place::Dec(p) => self.store_dec(value, &p)?,
                     Place::Bool(p) => self.gen_bool(value, &p)?,
                     Place::Str(b, l) => self.store_str(value, &b, &l)?,
                 }
@@ -1118,6 +1605,7 @@ impl Emitter {
                 }
                 match place {
                     Place::Int(p) => self.store_int(value, &p)?,
+                    Place::Dec(p) => self.store_dec(value, &p)?,
                     Place::Bool(p) => self.gen_bool(value, &p)?,
                     Place::Str(b, l) => self.store_str(value, &b, &l)?,
                 }
@@ -1134,6 +1622,7 @@ impl Emitter {
                 let rt = self.infer(x)?;
                 match rt {
                     Ty::Int => self.store_int(x, &format!("CUNI-R-{cf}"))?,
+                    Ty::Dec => self.store_dec(x, &format!("CUNI-R-{cf}"))?,
                     Ty::Bool => self.gen_bool(x, &format!("CUNI-R-{cf}"))?,
                     Ty::Str => self.store_str(
                         x,
@@ -1248,6 +1737,7 @@ impl Emitter {
             let dest = self.place_of(pn)?;
             match (pt, dest) {
                 (Ty::Int, Place::Int(d)) => self.ln(&format!("MOVE {pg} TO {d}.")),
+                (Ty::Dec, Place::Dec(d)) => self.ln(&format!("MOVE {pg} TO {d}.")),
                 (Ty::Bool, Place::Bool(d)) => self.ln(&format!("MOVE {pg} TO {d}.")),
                 (Ty::Str, Place::Str(b, l)) => {
                     self.ln(&format!("MOVE {pg} TO {b}."));
@@ -1276,6 +1766,9 @@ impl Emitter {
             Ty::Int => "PIC S9(19)",
             Ty::Bool => "PIC 9",
             Ty::Str => "PIC X(4096)",
+            // Dec shares the int item shape (scaled i64); the envelope
+            // |scaled| <= i64::MAX is enforced at emit, not by the PIC.
+            Ty::Dec => "PIC S9(19)",
         }
     }
 
@@ -1361,6 +1854,76 @@ impl Emitter {
         o.push_str("01 CUNI-MB PIC S9(19).\n");
         o.push_str("01 CUNI-MQ PIC S9(19).\n");
         o.push_str("01 CUNI-MR PIC S9(19).\n");
+        // Dec helpers (CUNI-DEC-MUL / CUNI-DEC-DIV / CUNI-DEC-SAY).
+        // All intermediates are <= 19 digits by construction (see the
+        // paragraphs), so PIC S9(19) never truncates silently; the
+        // paragraphs still check the i64 envelope explicitly.
+        o.push_str("01 CUNI-DM-K PIC S9(19) VALUE 10000.\n");
+        o.push_str("01 CUNI-DM-MAX PIC S9(19) VALUE 9223372036854775807.\n");
+        o.push_str("01 CUNI-DM-A PIC S9(19).\n");
+        o.push_str("01 CUNI-DM-B PIC S9(19).\n");
+        o.push_str("01 CUNI-DM-AQ PIC S9(19).\n");
+        o.push_str("01 CUNI-DM-AR PIC S9(19).\n");
+        o.push_str("01 CUNI-DM-BQ PIC S9(19).\n");
+        o.push_str("01 CUNI-DM-BR PIC S9(19).\n");
+        o.push_str("01 CUNI-DM-T1 PIC S9(19).\n");
+        o.push_str("01 CUNI-DM-T2 PIC S9(19).\n");
+        o.push_str("01 CUNI-DM-T3 PIC S9(19).\n");
+        o.push_str("01 CUNI-DM-RES PIC S9(19).\n");
+        o.push_str("01 CUNI-DM-ATMP PIC S9(19).\n");
+        o.push_str("01 CUNI-DM-BTMP PIC S9(19).\n");
+        o.push_str("01 CUNI-DM-AB2 PIC S9(19).\n");
+        o.push_str("01 CUNI-DM-MAXTMP PIC S9(19).\n");
+        o.push_str("01 CUNI-DM-LIM PIC S9(19).\n");
+        o.push_str("01 CUNI-DM-AAQ PIC S9(19).\n");
+        o.push_str("01 CUNI-DM-M1 PIC S9(19).\n");
+        o.push_str("01 CUNI-DM-M2 PIC S9(19).\n");
+        o.push_str("01 CUNI-DM-M3 PIC S9(19).\n");
+        o.push_str("01 CUNI-DM-LIM2 PIC S9(19).\n");
+        o.push_str("01 CUNI-DD-K PIC S9(19) VALUE 10000.\n");
+        o.push_str("01 CUNI-DD-A PIC S9(19).\n");
+        o.push_str("01 CUNI-DD-B PIC S9(19).\n");
+        o.push_str("01 CUNI-DD-Q PIC S9(19).\n");
+        o.push_str("01 CUNI-DD-R PIC S9(19).\n");
+        o.push_str("01 CUNI-DD-RES PIC S9(19).\n");
+        o.push_str("01 CUNI-DD-ATMP PIC S9(19).\n");
+        o.push_str("01 CUNI-DD-BTMP PIC S9(19).\n");
+        o.push_str("01 CUNI-DD-RTMP PIC S9(19).\n");
+        o.push_str("01 CUNI-DD-D PIC S9(19).\n");
+        o.push_str("01 CUNI-DD-E PIC S9(19).\n");
+        o.push_str("01 CUNI-DD-S PIC S9(19).\n");
+        o.push_str("01 CUNI-DD-RD PIC S9(19).\n");
+        o.push_str("01 CUNI-DD-X PIC S9(19).\n");
+        o.push_str("01 CUNI-DD-Y PIC S9(19).\n");
+        o.push_str("01 CUNI-DD-AX PIC S9(19).\n");
+        o.push_str("01 CUNI-DD-AY PIC S9(19).\n");
+        o.push_str("01 CUNI-DD-AB PIC S9(19).\n");
+        o.push_str("01 CUNI-DD-THR PIC S9(19).\n");
+        o.push_str("01 CUNI-DD-T1 PIC S9(19).\n");
+        o.push_str("01 CUNI-DD-T2 PIC S9(19).\n");
+        o.push_str("01 CUNI-DD-M1 PIC S9(19).\n");
+        o.push_str("01 CUNI-DD-M2 PIC S9(19).\n");
+        o.push_str("01 CUNI-DD-LIM PIC S9(19).\n");
+        o.push_str("01 CUNI-DD-SAME PIC 9.\n");
+        o.push_str("01 CUNI-DD-GE PIC 9.\n");
+        o.push_str("01 CUNI-DD-FZERO PIC 9.\n");
+        o.push_str("01 CUNI-DD-FPOS PIC 9.\n");
+        o.push_str("01 CUNI-DD-FINT PIC 9.\n");
+        o.push_str("01 CUNI-DD-WS PIC 9.\n");
+        o.push_str("01 CUNI-DD-G PIC S9(19).\n");
+        o.push_str("01 CUNI-DD-ADJ PIC S9(19).\n");
+        o.push_str("01 CUNI-DS-K PIC S9(19) VALUE 10000.\n");
+        o.push_str("01 CUNI-DS-V PIC S9(19).\n");
+        o.push_str("01 CUNI-DS-I PIC S9(19).\n");
+        o.push_str("01 CUNI-DS-ITMP PIC S9(19).\n");
+        o.push_str("01 CUNI-DS-AI PIC S9(19).\n");
+        o.push_str("01 CUNI-DS-AF PIC S9(19).\n");
+        o.push_str("01 CUNI-DS-F4 PIC 9(4).\n");
+        o.push_str("01 CUNI-DS-FS PIC X(4).\n");
+        o.push_str("01 CUNI-DS-IE PIC -(19)9.\n");
+        o.push_str("01 CUNI-DS-FSL PIC 9(9).\n");
+        o.push_str("01 CUNI-DS-BUF PIC X(26).\n");
+        o.push_str("01 CUNI-DS-NEG PIC 9.\n");
         o.push_str(&format!("01 CUNI-CA PIC X({STR_BUF}).\n"));
         o.push_str("01 CUNI-CA-LEN PIC 9(9).\n");
         o.push_str(&format!("01 CUNI-CB PIC X({STR_BUF}).\n"));
@@ -1423,6 +1986,7 @@ impl Emitter {
         for d in &defs {
             o.push_str(d);
         }
+        o.push_str(DEC_PARAS);
         Ok(o)
     }
 }

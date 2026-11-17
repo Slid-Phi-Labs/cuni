@@ -43,7 +43,12 @@ fn groovy_str(s: &str) -> String {
 
 const SPEC: LangSpec = LangSpec {
     comment: "//",
-    header: "def cuni_div(a, b) { a.intdiv(b) }\ndef cuni_mod(a, b) { ((a % b) + b) % b }\ndef cuni_say(x, ty) { if (ty == \"bool\") { println(x ? \"True\" : \"False\") } else { println(x) } }\n",
+    header: "def cuni_div(a, b) { a.intdiv(b) }\ndef cuni_mod(a, b) { ((a % b) + b) % b }\ndef cuni_say(x, ty) { if (ty == \"bool\") { println(x ? \"True\" : \"False\") } else { println(x) } }\ndef cuni_dec_mul(a, b) { def r = (a * b).intdiv(10000); if (r > 9223372036854775807L || r < -9223372036854775807L - 1L) { throw new ArithmeticException(\"cuni: dec multiplication overflow\") }; return r }\ndef cuni_dec_div(a, b) { if (b == 0) { throw new ArithmeticException(\"cuni: dec division by zero\") }; def r = (a * 10000).intdiv(b); if (r > 9223372036854775807L || r < -9223372036854775807L - 1L) { throw new ArithmeticException(\"cuni: dec division overflow\") }; return r }\ndef cuni_dec_str(v) { def s = v < 0 ? \"-\" : \"\"; def a = v < 0 ? -v : v; def ip = a.intdiv(10000); def fr = a % 10000; def fs = String.format(\"%04d\", fr); while (fs.endsWith(\"0\")) { fs = fs.substring(0, fs.length() - 1) }; if (fs.isEmpty()) { fs = \"0\" }; return s + ip + \".\" + fs }\n",
+    // NOTE (2026-11-17 fix): Groovy 2.4 needs a `;` between a closing `}`
+    // and a following `return` on the same line (else "unexpected token:
+    // return"), and Groovy numerics auto-promote past Long, so the dec
+    // helpers range-check the result explicitly instead of relying on
+    // overflow — the pre-fix helpers were both unparseable and unchecked.
     // Groovy scripts run top-level statements directly: no main wrapper.
     main_open: "",
     main_close: "",
@@ -66,6 +71,13 @@ const SPEC: LangSpec = LangSpec {
     int_div_helper: Some("cuni_div"),
     // Groovy `%` on ints truncates like Java; CuNi wants Python-floored.
     int_mod_helper: Some("cuni_mod"),
+    // dec (docs/DECIMAL.md §3, §6): Groovy numerics auto-promote, so the
+    // seat is wide — no literal envelope check.
+    dec_mul_helper: Some("cuni_dec_mul"),
+    dec_div_helper: Some("cuni_dec_div"),
+    dec_str_helper: Some("cuni_dec_str"),
+    dec_lit_suffix: "",
+    dec_max_abs: None,
     // Groovy `==` is .equals (right for strings); `<` is compareTo.
     str_eq_op: "==",
     str_ne_op: "!=",

@@ -23,7 +23,7 @@ fn perl_str(s: &str) -> String {
 
 const SPEC: LangSpec = LangSpec {
     comment: "#",
-    header: "sub cuni_say { my ($x,$ty)=@_; print(($ty eq \"bool\" ? ($x ? \"True\" : \"False\") : $x), \"\\n\"); }\nsub cuni_div { my ($a,$b)=@_; return int($a/$b); }\n",
+    header: "sub cuni_say { my ($x,$ty)=@_; print(($ty eq \"bool\" ? ($x ? \"True\" : \"False\") : $x), \"\\n\"); }\nsub cuni_div { my ($a,$b)=@_; return int($a/$b); }\nsub cuni_dec_mul { my ($a,$b)=@_; return int($a*$b/10000); }\nsub cuni_dec_div { my ($a,$b)=@_; die \"cuni: dec division by zero\" if $b == 0; return int($a*10000/$b); }\nsub cuni_dec_str { my ($v)=@_; my $s=\"\"; if ($v<0) { $s=\"-\"; $v=-$v; } my $ip=int($v/10000); my $fr=$v%10000; my $fs=sprintf(\"%04d\",$fr); $fs=~s/0+$//; $fs=\"0\" if $fs eq \"\"; return $s.$ip.\".\".$fs; }\n",
     main_open: "", main_close: "",
     let_fmt: "my {name} = {expr};", mut_fmt: "my {name} = {expr};", assign_fmt: "{name} = {expr};",
     fn_open_fmt: "sub {name} {\n    my ({params}) = @_;",
@@ -37,6 +37,13 @@ const SPEC: LangSpec = LangSpec {
     str_quote: perl_str,
     int_div_helper: Some("cuni_div"), // Perl `/` yields float; int() truncates toward zero.
     int_mod_helper: None, // Perl `%` already floors like Python.
+    // dec (docs/DECIMAL.md §3, §6): int() truncates; IV/NV semantics
+    // beyond the int64 envelope follow Perl (documented limitation).
+    dec_mul_helper: Some("cuni_dec_mul"),
+    dec_div_helper: Some("cuni_dec_div"),
+    dec_str_helper: Some("cuni_dec_str"),
+    dec_lit_suffix: "",
+    dec_max_abs: Some(9_223_372_036_854_775_807),
     str_eq_op: "eq",
     str_ne_op: "ne",
     str_lt_op: "lt",

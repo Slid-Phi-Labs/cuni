@@ -131,7 +131,7 @@ fn fs_post(src: &str) -> String {
 
 const SPEC: LangSpec = LangSpec {
     comment: "//",
-    header: "exception CuniRet of obj\nlet cuni_say (x: obj) (ty: string) =\n    if ty = \"bool\" then printfn \"%s\" (if unbox<bool> x then \"True\" else \"False\")\n    else printfn \"%O\" x\nlet inline cuni_mod (a, b) = ((a % b) + b) % b\n",
+    header: "exception CuniRet of obj\nlet cuni_say (x: obj) (ty: string) =\n    if ty = \"bool\" then printfn \"%s\" (if unbox<bool> x then \"True\" else \"False\")\n    else printfn \"%O\" x\nlet inline cuni_mod (a, b) = ((a % b) + b) % b\nlet cuni_dec_mul (a: int64, b: int64) = int64 ((bigint a * bigint b) / 10000I)\nlet cuni_dec_div (a: int64, b: int64) = int64 ((bigint a * 10000I) / bigint b)\nlet cuni_dec_str (v: int64) =\n    let s = if v < 0L then \"-\" else \"\"\n    let a = if v < 0L then -v else v\n    let ip = a / 10000L\n    let fr = a % 10000L\n    let mutable f = fr\n    let mutable digits = 4L\n    while f <> 0L && f % 10L = 0L do\n        f <- f / 10L\n        digits <- digits - 1L\n    if f = 0L then digits <- 1L\n    let mutable fs = f.ToString()\n    while fs.Length < int digits do fs <- \"0\" + fs\n    s + ip.ToString() + \".\" + fs\n",
     // Top-level statements run directly in the .fsx script.
     main_open: "",
     main_close: "",
@@ -157,6 +157,14 @@ const SPEC: LangSpec = LangSpec {
     int_div_helper: None,
     // F# `%` truncates; CuNi wants Python-floored.
     int_mod_helper: Some("cuni_mod"),
+    // dec (docs/DECIMAL.md §3, §6): int64 seat; BigInteger intermediates
+    // refuse overflow loudly, division by zero throws. Literals gain `L`
+    // from the fs_post pass, so no dec_lit_suffix is needed.
+    dec_mul_helper: Some("cuni_dec_mul"),
+    dec_div_helper: Some("cuni_dec_div"),
+    dec_str_helper: Some("cuni_dec_str"),
+    dec_lit_suffix: "",
+    dec_max_abs: Some(i64::MAX as i128),
     str_eq_op: "=",
     str_ne_op: "<>",
     str_lt_op: "<",
@@ -186,6 +194,8 @@ fn type_defs(program: &Program, src: &str) -> Result<String, String> {
             Type::Named(n) if n == "int" => Ok("int64"),
             Type::Named(n) if n == "str" => Ok("string"),
             Type::Named(n) if n == "bool" => Ok("bool"),
+            // Dec is a scaled int64 (docs/DECIMAL.md); same annotation.
+            Type::Named(n) if n == "dec" => Ok("int64"),
             _ => Err("def type beyond int/str/bool: refusing".into()),
         }
     }

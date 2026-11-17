@@ -23,6 +23,7 @@ enum Ty {
     Int,
     Str,
     Bool,
+    Dec,
 }
 
 fn ty_of(ty: &Type) -> Result<Ty, String> {
@@ -30,6 +31,7 @@ fn ty_of(ty: &Type) -> Result<Ty, String> {
         Type::Named(n) if n == "int" => Ok(Ty::Int),
         Type::Named(n) if n == "str" => Ok(Ty::Str),
         Type::Named(n) if n == "bool" => Ok(Ty::Bool),
+        Type::Named(n) if n == "dec" => Ok(Ty::Dec),
         _ => Err("type beyond core subset; refusing".into()),
     }
 }
@@ -39,6 +41,8 @@ fn nim_ty(t: Ty) -> &'static str {
         Ty::Int => "int64",
         Ty::Str => "string",
         Ty::Bool => "bool",
+        // `dec` is a scaled int64 (docs/DECIMAL.md, scale 10^4).
+        Ty::Dec => "int64",
     }
 }
 
@@ -67,6 +71,30 @@ proc cuni_say_int(x: int64): void = echo x
 proc cuni_say_str(x: string): void = echo x
 proc cuni_say_bool(x: bool): void = echo (if x: "True" else: "False")
 proc cuni_mod(a, b: int64): int64 = ((a mod b) + b) mod b
+# dec (docs/DECIMAL.md §3, §6): scaled int64, scale 10^4. Mul/div
+# pre-check the int64 envelope and refuse loudly on overflow;
+# division by zero raises before the division.
+proc cuni_dec_mul(a, b: int64): int64 =
+  if b != 0 and abs(a) > high(int64) div abs(b):
+    raise newException(OverflowDefect, "cuni: dec multiplication overflow")
+  (a * b) div 10000
+proc cuni_dec_div(a, b: int64): int64 =
+  if b == 0:
+    raise newException(DivByZeroDefect, "cuni: dec division by zero")
+  if abs(a) > high(int64) div 10000:
+    raise newException(OverflowDefect, "cuni: dec division intermediate overflow")
+  (a * 10000) div b
+proc cuni_dec_str(v: int64): string =
+  let s = if v < 0: "-" else: ""
+  let a = if v < 0: -v else: v
+  let ip = a div 10000
+  let fr = a mod 10000
+  var fs = $fr
+  while fs.len < 4: fs = "0" & fs
+  while fs.len > 1 and fs[^1] == '0': fs.setLen(fs.len - 1)
+  if fs.len == 0: fs = "0"
+  s & $ip & "." & fs
+proc cuni_say_dec(x: int64): void = echo cuni_dec_str(x)
 "#;
 
 struct Emitter {
@@ -271,6 +299,7 @@ impl Emitter {
                                 Ty::Int => "cuni_say_int",
                                 Ty::Str => "cuni_say_str",
                                 Ty::Bool => "cuni_say_bool",
+                                Ty::Dec => "cuni_say_dec",
                             };
                             self.line(&format!("{}({})", f, v));
                             return Ok(());
@@ -290,7 +319,17 @@ impl Emitter {
             ExprKind::Bool(b) => Ok((b.to_string(), Ty::Bool)),
             ExprKind::Str(s) => Ok((nim_str(s), Ty::Str)),
             ExprKind::Float(_) => Err("float: beyond core subset; refusing".into()),
-            ExprKind::Dec(_) => Err("dec: beyond core subset; refusing".into()),
+            ExprKind::Dec(v) => {
+                // Scaled integer (parser scaled once, ast.rs); narrow seats
+                // refuse out-of-envelope literals at emit (DECIMAL.md §7).
+                if *v > i64::MAX as i128 || *v < -(i64::MAX as i128) {
+                    return Err(format!(
+                        "dec literal `{v}` exceeds this seat's envelope (|scaled| <= {}); refusing",
+                        i64::MAX
+                    ));
+                }
+                Ok((v.to_string(), Ty::Dec))
+            }
             ExprKind::Time(_) => Err("time: beyond core subset; refusing".into()),
             ExprKind::NoneLit => Err("none: beyond core subset; refusing".into()),
             ExprKind::Ident(n) => {
@@ -330,29 +369,52 @@ impl Emitter {
             ExprKind::Binary { op, lhs, rhs } => {
                 let (l, lt) = self.gen_expr(lhs)?;
                 let (r, rt) = self.gen_expr(rhs)?;
+                // `dec` and `int` never mix (typeck refuses first; this is
+                // defense in depth).
+                if matches!(op, BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge)
+                    && ((lt == Ty::Dec) != (rt == Ty::Dec))
+                {
+                    return Err(
+                        "mixed dec/int comparison: beyond core subset; refusing".into(),
+                    );
+                }
                 match op {
                     BinOp::Add => {
                         if lt == Ty::Str && rt == Ty::Str {
                             return Ok((format!("({} & {})", l, r), Ty::Str));
                         } else if lt == Ty::Int && rt == Ty::Int {
                             return Ok((format!("({} + {})", l, r), Ty::Int));
+                        } else if lt == Ty::Dec && rt == Ty::Dec {
+                            return Ok((format!("({} + {})", l, r), Ty::Dec));
                         }
                         Err("mixed-type `+`: beyond core subset; refusing".into())
                     }
                     BinOp::Sub => {
-                        self.require_ints(lt, rt, "-")?;
-                        Ok((format!("({} - {})", l, r), Ty::Int))
+                        let pair = self.require_nums(lt, rt, "-")?;
+                        Ok((format!("({} - {})", l, r), pair))
                     }
                     BinOp::Mul => {
-                        self.require_ints(lt, rt, "*")?;
+                        let pair = self.require_nums(lt, rt, "*")?;
+                        if pair == Ty::Dec {
+                            // trunc(a*b/10000) toward zero (DECIMAL.md §3).
+                            return Ok((format!("cuni_dec_mul({}, {})", l, r), Ty::Dec));
+                        }
                         Ok((format!("({} * {})", l, r), Ty::Int))
                     }
                     BinOp::Div => {
-                        self.require_ints(lt, rt, "/")?;
+                        let pair = self.require_nums(lt, rt, "/")?;
+                        if pair == Ty::Dec {
+                            // trunc(a*10000/b) toward zero; b == 0 fails
+                            // loudly in the helper (DECIMAL.md §3).
+                            return Ok((format!("cuni_dec_div({}, {})", l, r), Ty::Dec));
+                        }
                         // Nim `div` truncates toward zero (CuNi).
                         Ok((format!("({} div {})", l, r), Ty::Int))
                     }
                     BinOp::Mod => {
+                        if lt == Ty::Dec || rt == Ty::Dec {
+                            return Err("`%` is not defined on `dec`".into());
+                        }
                         self.require_ints(lt, rt, "%")?;
                         // Nim `mod` follows the dividend; CuNi wants floored.
                         Ok((format!("cuni_mod({}, {})", l, r), Ty::Int))
@@ -383,13 +445,23 @@ impl Emitter {
                         Ok((format!("(not {})", v), Ty::Bool))
                     }
                     UnOp::Neg => {
-                        if t != Ty::Int {
-                            return Err("unary `-` on non-int: beyond core subset; refusing".into());
+                        if t != Ty::Int && t != Ty::Dec {
+                            return Err("unary `-` on non-int/dec: beyond core subset; refusing".into());
                         }
-                        Ok((format!("(-{})", v), Ty::Int))
+                        Ok((format!("(-{})", v), t))
                     }
                 }
             }
+        }
+    }
+
+    fn require_nums(&self, l: Ty, r: Ty, op: &str) -> Result<Ty, String> {
+        if l == Ty::Int && r == Ty::Int {
+            Ok(Ty::Int)
+        } else if l == Ty::Dec && r == Ty::Dec {
+            Ok(Ty::Dec)
+        } else {
+            Err(format!("`{}` on mixed types: beyond core subset; refusing", op))
         }
     }
 

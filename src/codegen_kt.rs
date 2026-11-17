@@ -55,6 +55,7 @@ enum Ty {
     Int,
     Str,
     Bool,
+    Dec,
 }
 
 fn ty_of(ty: &Type) -> Result<Ty, String> {
@@ -62,6 +63,7 @@ fn ty_of(ty: &Type) -> Result<Ty, String> {
         Type::Named(n) if n == "int" => Ok(Ty::Int),
         Type::Named(n) if n == "str" => Ok(Ty::Str),
         Type::Named(n) if n == "bool" => Ok(Ty::Bool),
+        Type::Named(n) if n == "dec" => Ok(Ty::Dec),
         _ => Err("type beyond core subset; refusing".into()),
     }
 }
@@ -71,6 +73,8 @@ fn kt_ty(t: Ty) -> &'static str {
         Ty::Int => "Long",
         Ty::Str => "String",
         Ty::Bool => "Boolean",
+        // `dec` is a scaled Long (docs/DECIMAL.md, scale 10^4).
+        Ty::Dec => "Long",
     }
 }
 
@@ -100,6 +104,28 @@ const HELPERS: &str = concat!(
     "fun cuni_say(x: Long) = println(x)\n",
     "fun cuni_say(x: String) = println(x)\n",
     "fun cuni_say(x: Boolean) = println(if (x) \"True\" else \"False\")\n",
+    // dec (docs/DECIMAL.md §3, §6): scaled Long, scale 10^4. Mul/div
+    // pre-check the int64 envelope and refuse loudly on overflow;
+    // division by zero throws ArithmeticException.
+    "fun cuni_dec_mul(a: Long, b: Long): Long {\n",
+    "    if (b != 0L && Math.absExact(a) > Long.MAX_VALUE / Math.absExact(b)) { throw ArithmeticException(\"cuni: dec multiplication overflow\") }\n",
+    "    return (a * b) / 10000L\n",
+    "}\n",
+    "fun cuni_dec_div(a: Long, b: Long): Long {\n",
+    "    if (b == 0L) { throw ArithmeticException(\"cuni: dec division by zero\") }\n",
+    "    if (Math.absExact(a) > Long.MAX_VALUE / 10000L) { throw ArithmeticException(\"cuni: dec division intermediate overflow\") }\n",
+    "    return (a * 10000L) / b\n",
+    "}\n",
+    "fun cuni_dec_str(v: Long): String {\n",
+    "    val s = if (v < 0L) \"-\" else \"\"\n",
+    "    val a = Math.absExact(v)\n",
+    "    val ip = a / 10000L\n",
+    "    val fr = a % 10000L\n",
+    "    var fs = fr.toString().padStart(4, '0')\n",
+    "    while (fs.endsWith(\"0\")) { fs = fs.dropLast(1) }\n",
+    "    if (fs.isEmpty()) { fs = \"0\" }\n",
+    "    return s + ip.toString() + \".\" + fs\n",
+    "}\n",
 );
 
 struct Emitter {
@@ -419,7 +445,13 @@ impl Emitter {
                                         "say: exactly one argument in core subset; refusing".into()
                                     );
                                 }
-                                let (v, _) = self.gen_expr(args[0].expr())?;
+                                let (v, vt) = self.gen_expr(args[0].expr())?;
+                                // `dec` prints through the canonical renderer
+                                // as a String (cuni_say(String) overload).
+                                let v = match vt {
+                                    Ty::Dec => format!("cuni_dec_str({})", v),
+                                    _ => v,
+                                };
                                 self.line(&format!("cuni_say({})", v));
                                 return Ok(());
                             }
@@ -442,7 +474,17 @@ impl Emitter {
             )),
             ExprKind::Str(s) => Ok((kt_str(s), Ty::Str)),
             ExprKind::Float(_) => Err("float: beyond core subset; refusing".into()),
-            ExprKind::Dec(_) => Err("dec: beyond core subset; refusing".into()),
+            ExprKind::Dec(v) => {
+                // Scaled integer (parser scaled once, ast.rs); narrow seats
+                // refuse out-of-envelope literals at emit (DECIMAL.md §7).
+                if *v > i64::MAX as i128 || *v < -(i64::MAX as i128) {
+                    return Err(format!(
+                        "dec literal `{v}` exceeds this seat's envelope (|scaled| <= {}); refusing",
+                        i64::MAX
+                    ));
+                }
+                Ok((format!("{}L", v), Ty::Dec))
+            }
             ExprKind::Time(_) => Err("time: beyond core subset; refusing".into()),
             ExprKind::NoneLit => Err("none: beyond core subset; refusing".into()),
             ExprKind::Ident(n) => {
@@ -484,29 +526,52 @@ impl Emitter {
             ExprKind::Binary { op, lhs, rhs } => {
                 let (l, lt) = self.gen_expr(lhs)?;
                 let (r, rt) = self.gen_expr(rhs)?;
+                // `dec` and `int` never mix (typeck refuses first; this is
+                // defense in depth).
+                if matches!(op, BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge)
+                    && ((lt == Ty::Dec) != (rt == Ty::Dec))
+                {
+                    return Err(
+                        "mixed dec/int comparison: beyond core subset; refusing".into(),
+                    );
+                }
                 match op {
                     BinOp::Add => {
                         if lt == Ty::Str && rt == Ty::Str {
                             return Ok((format!("({} + {})", l, r), Ty::Str));
                         } else if lt == Ty::Int && rt == Ty::Int {
                             return Ok((format!("({} + {})", l, r), Ty::Int));
+                        } else if lt == Ty::Dec && rt == Ty::Dec {
+                            return Ok((format!("({} + {})", l, r), Ty::Dec));
                         }
                         return Err("mixed-type `+`: beyond core subset; refusing".into());
                     }
                     BinOp::Sub => {
-                        require_ints(lt, rt, "-")?;
-                        Ok((format!("({} - {})", l, r), Ty::Int))
+                        let pair = require_num_pair(lt, rt, "-")?;
+                        Ok((format!("({} - {})", l, r), pair))
                     }
                     BinOp::Mul => {
-                        require_ints(lt, rt, "*")?;
+                        let pair = require_num_pair(lt, rt, "*")?;
+                        if pair == Ty::Dec {
+                            // trunc(a*b/10000) toward zero (DECIMAL.md §3).
+                            return Ok((format!("cuni_dec_mul({}, {})", l, r), Ty::Dec));
+                        }
                         Ok((format!("({} * {})", l, r), Ty::Int))
                     }
                     BinOp::Div => {
-                        require_ints(lt, rt, "/")?;
+                        let pair = require_num_pair(lt, rt, "/")?;
+                        if pair == Ty::Dec {
+                            // trunc(a*10000/b) toward zero; b == 0 fails
+                            // loudly in the helper (DECIMAL.md §3).
+                            return Ok((format!("cuni_dec_div({}, {})", l, r), Ty::Dec));
+                        }
                         // Long `/` truncates toward zero: CuNi semantics.
                         Ok((format!("({} / {})", l, r), Ty::Int))
                     }
                     BinOp::Mod => {
+                        if lt == Ty::Dec || rt == Ty::Dec {
+                            return Err("`%` is not defined on `dec`".into());
+                        }
                         require_ints(lt, rt, "%")?;
                         // Kotlin `%` truncates; the helper floors.
                         Ok((format!("cuni_mod({}, {})", l, r), Ty::Int))
@@ -540,14 +605,24 @@ impl Emitter {
                         Ok((format!("(!{})", v), Ty::Bool))
                     }
                     UnOp::Neg => {
-                        if t != Ty::Int {
-                            return Err("unary `-` on non-int: beyond core subset; refusing".into());
+                        if t != Ty::Int && t != Ty::Dec {
+                            return Err("unary `-` on non-int/dec: beyond core subset; refusing".into());
                         }
-                        Ok((format!("(-{})", v), Ty::Int))
+                        Ok((format!("(-{})", v), t))
                     }
                 }
             }
         }
+    }
+}
+
+fn require_num_pair(l: Ty, r: Ty, op: &str) -> Result<Ty, String> {
+    if l == Ty::Int && r == Ty::Int {
+        Ok(Ty::Int)
+    } else if l == Ty::Dec && r == Ty::Dec {
+        Ok(Ty::Dec)
+    } else {
+        Err(format!("`{}` on mixed types: beyond core subset; refusing", op))
     }
 }
 

@@ -16,6 +16,7 @@ enum Ty {
     Int,
     Str,
     Bool,
+    Dec,
 }
 
 fn ty_of(t: &Type) -> Result<Ty, String> {
@@ -23,6 +24,7 @@ fn ty_of(t: &Type) -> Result<Ty, String> {
         Type::Named(n) if n == "int" => Ok(Ty::Int),
         Type::Named(n) if n == "str" => Ok(Ty::Str),
         Type::Named(n) if n == "bool" => Ok(Ty::Bool),
+        Type::Named(n) if n == "dec" => Ok(Ty::Dec),
         _ => Err("type beyond core subset; refusing".into()),
     }
 }
@@ -51,6 +53,8 @@ fn tcl_str(s: &str) -> String {
 const HEADER: &str = r#"proc cuni_say {x ty} {
     if {$ty eq "bool"} {
         if {$x} {puts "True"} else {puts "False"}
+    } elseif {$ty eq "dec"} {
+        puts [cuni_dec_str $x]
     } else {
         puts $x
     }
@@ -63,6 +67,29 @@ proc cuni_div {a b} {
         incr q
     }
     return $q
+}
+# dec (docs/DECIMAL.md §3, §6): scaled integer, scale 10^4. Tcl
+# integers are bignum, so the envelope is unbounded. Mul/div go
+# through cuni_div, which truncates toward zero (CuNi); division by
+# zero errors before the division.
+proc cuni_dec_mul {a b} {
+    return [cuni_div [expr {$a * $b}] 10000]
+}
+proc cuni_dec_div {a b} {
+    if {$b == 0} { error "cuni: dec division by zero" }
+    return [cuni_div [expr {$a * 10000}] $b]
+}
+proc cuni_dec_str {v} {
+    set s [expr {$v < 0 ? "-" : ""}]
+    set a [expr {abs($v)}]
+    set ip [expr {$a / 10000}]
+    set fr [expr {$a % 10000}]
+    set fs [format %04d $fr]
+    while {[string index $fs end] eq "0"} {
+        set fs [string range $fs 0 end-1]
+    }
+    if {$fs eq ""} { set fs "0" }
+    return "$s$ip.$fs"
 }
 "#;
 
@@ -93,7 +120,8 @@ impl Gen {
             ExprKind::Bool(b) => Ok((if *b { "1" } else { "0" }.to_string(), Ty::Bool)),
             ExprKind::Str(s) => Ok((tcl_str(s), Ty::Str)),
             ExprKind::Float(_) => Err("float: beyond core subset; refusing".into()),
-            ExprKind::Dec(_) => Err("dec: beyond core subset; refusing".into()),
+            // Tcl integers are bignum, so the envelope is unbounded.
+            ExprKind::Dec(v) => Ok((v.to_string(), Ty::Dec)),
             ExprKind::Time(_) => Err("time: beyond core subset; refusing".into()),
             ExprKind::NoneLit => Err("none: beyond core subset; refusing".into()),
             ExprKind::Ident(n) => {
@@ -141,6 +169,30 @@ impl Gen {
             ExprKind::Binary { op, lhs, rhs } => {
                 let (l, lt) = self.expr(lhs)?;
                 let (r, rt) = self.expr(rhs)?;
+                // dec pairs (docs/DECIMAL.md §3): + / - plain, * / via
+                // helpers (trunc toward zero), % refused, comparisons on
+                // the scaled integers.
+                if lt == Ty::Dec && rt == Ty::Dec {
+                    return Ok(match op {
+                        BinOp::Add => (format!("({}+{})", l, r), Ty::Dec),
+                        BinOp::Sub => (format!("({}-{})", l, r), Ty::Dec),
+                        BinOp::Mul => (format!("[cuni_dec_mul {} {}]", l, r), Ty::Dec),
+                        BinOp::Div => (format!("[cuni_dec_div {} {}]", l, r), Ty::Dec),
+                        BinOp::Mod => return Err("`%` is not defined on `dec`".into()),
+                        BinOp::Eq => (format!("({}=={})", l, r), Ty::Bool),
+                        BinOp::Ne => (format!("({}!={})", l, r), Ty::Bool),
+                        BinOp::Lt => (format!("({}<{})", l, r), Ty::Bool),
+                        BinOp::Gt => (format!("({}>{})", l, r), Ty::Bool),
+                        BinOp::Le => (format!("({}<={})", l, r), Ty::Bool),
+                        BinOp::Ge => (format!("({}>={})", l, r), Ty::Bool),
+                        _ => return Err(format!("dec `{:?}`: beyond core subset; refusing", op)),
+                    });
+                }
+                // `dec` and `int` never mix (typeck refuses first; this is
+                // defense in depth).
+                if (lt == Ty::Dec) != (rt == Ty::Dec) {
+                    return Err("mixed dec/int: beyond core subset; refusing".into());
+                }
                 let (frag, ty) = match op {
                     BinOp::Add => {
                         if lt == Ty::Str && rt == Ty::Str {
@@ -200,10 +252,10 @@ impl Gen {
                         Ok((format!("(!{})", v), Ty::Bool))
                     }
                     UnOp::Neg => {
-                        if t != Ty::Int {
-                            return Err("unary `-` on non-int: beyond core subset; refusing".into());
+                        if t != Ty::Int && t != Ty::Dec {
+                            return Err("unary `-` on non-int/dec: beyond core subset; refusing".into());
                         }
-                        Ok((format!("(-{})", v), Ty::Int))
+                        Ok((format!("(-{})", v), t))
                     }
                 }
             }
@@ -250,6 +302,7 @@ impl Gen {
             Ty::Int => "int",
             Ty::Str => "str",
             Ty::Bool => "bool",
+            Ty::Dec => "dec",
         }
     }
 

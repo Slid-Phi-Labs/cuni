@@ -28,7 +28,7 @@ fn php_str(s: &str) -> String {
 
 const SPEC: LangSpec = LangSpec {
     comment: "<?php //",
-    header: "function cuni_say($x, $ty) {\n    if ($ty === \"bool\") { echo $x ? \"True\\n\" : \"False\\n\"; }\n    else { echo $x . \"\\n\"; }\n}\nfunction cuni_mod($a, $b) { return (($a % $b) + $b) % $b; }\n",
+    header: "function cuni_say($x, $ty) {\n    if ($ty === \"bool\") { echo $x ? \"True\\n\" : \"False\\n\"; }\n    else { echo $x . \"\\n\"; }\n}\nfunction cuni_mod($a, $b) { return (($a % $b) + $b) % $b; }\nfunction cuni_dec_mul($a, $b) { if ($b != 0 && abs($a) > intdiv(PHP_INT_MAX, abs($b))) { throw new Exception(\"cuni: dec multiplication overflow\"); } return intdiv($a * $b, 10000); }\nfunction cuni_dec_div($a, $b) { if ($b == 0) { throw new Exception(\"cuni: dec division by zero\"); } if (abs($a) > intdiv(PHP_INT_MAX, 10000)) { throw new Exception(\"cuni: dec division intermediate overflow\"); } return intdiv($a * 10000, $b); }\nfunction cuni_dec_str($v) { $s = \"\"; if ($v < 0) { $s = \"-\"; $v = -$v; } $ip = intdiv($v, 10000); $fr = $v % 10000; $fs = sprintf(\"%04d\", $fr); $fs = rtrim($fs, \"0\"); if ($fs === \"\") { $fs = \"0\"; } return $s . $ip . \".\" . $fs; }\n",
     main_open: "",
     main_close: "",
     let_fmt: "{name} = {expr};",
@@ -50,6 +50,13 @@ const SPEC: LangSpec = LangSpec {
     int_div_helper: Some("intdiv"),
     // PHP `%` truncates like C; CuNi wants Python-floored.
     int_mod_helper: Some("cuni_mod"),
+    // dec (docs/DECIMAL.md §3, §6): intdiv() truncates; mul/div helpers
+    // pre-check the int64 envelope and refuse loudly on overflow.
+    dec_mul_helper: Some("cuni_dec_mul"),
+    dec_div_helper: Some("cuni_dec_div"),
+    dec_str_helper: Some("cuni_dec_str"),
+    dec_lit_suffix: "",
+    dec_max_abs: Some(9_223_372_036_854_775_807),
     str_eq_op: "==",
     str_ne_op: "!=",
     str_lt_op: "<",

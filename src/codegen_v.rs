@@ -27,6 +27,7 @@ enum Ty {
     Int,
     Str,
     Bool,
+    Dec,
 }
 
 fn ty_of(ty: &Type) -> Result<Ty, String> {
@@ -34,6 +35,7 @@ fn ty_of(ty: &Type) -> Result<Ty, String> {
         Type::Named(n) if n == "int" => Ok(Ty::Int),
         Type::Named(n) if n == "str" => Ok(Ty::Str),
         Type::Named(n) if n == "bool" => Ok(Ty::Bool),
+        Type::Named(n) if n == "dec" => Ok(Ty::Dec),
         _ => Err("type beyond core subset; refusing".into()),
     }
 }
@@ -43,6 +45,8 @@ fn v_ty(t: Ty) -> &'static str {
         Ty::Int => "i64",
         Ty::Str => "string",
         Ty::Bool => "bool",
+        // `dec` is a scaled i64 (docs/DECIMAL.md, scale 10^4).
+        Ty::Dec => "i64",
     }
 }
 
@@ -51,7 +55,7 @@ fn v_ty(t: Ty) -> &'static str {
 /// cast when the value is already i64) to pin the type.
 fn v_init(name: &str, vt: Ty, v: &str, mutable: bool) -> String {
     let init = match vt {
-        Ty::Int => format!("i64({})", v),
+        Ty::Int | Ty::Dec => format!("i64({})", v),
         _ => v.to_string(),
     };
     if mutable {
@@ -94,8 +98,165 @@ fn cuni_say_str(x string) {
 fn cuni_say_bool(x bool) {
     println(if x { 'True' } else { 'False' })
 }
+fn cuni_say_dec(x i64) {
+    println(cuni_dec_str(x))
+}
 fn cuni_mod(a i64, b i64) i64 {
     return ((a % b) + b) % b
+}
+// dec (docs/DECIMAL.md §3, §6): scaled i64, scale 10^4. V 0.5.2 has no
+// 128-bit integer, so mul/div stay in i64 via the aq/ar split
+// (a = aq*10000 + ar, |ar| < 10000) with exact overflow guards: every
+// intermediate product is proven to fit, and the result magnitude is
+// checked against max (max+1 on the negative side) before returning.
+fn cuni_dec_mul(a i64, b i64) i64 {
+    if a == 0 || b == 0 {
+        return 0
+    }
+    aq := a / 10000
+    ar := a % 10000
+    // Guard aq*b: |aq| > max/|b| <=> |aq*b| > max (then |result| > max,
+    // since the other terms share its sign). |b| without negating MIN
+    // (lim 0 there: any nonzero aq overflows). The i64(0) first branch
+    // pins the if-expression to i64: a bare 0 would infer int and
+    // truncate the later branches to 32 bits.
+    lim := if b == -9223372036854775807 - 1 { i64(0) } else if b < 0 { 9223372036854775807 / -b } else { 9223372036854775807 / b }
+    if aq > lim || aq < -lim {
+        panic('cuni: dec multiplication overflow')
+    }
+    bq := b / 10000
+    br := b % 10000
+    // |ar*bq| <= 9999 * 922337203685477 < max; |ar*br| <= 9999^2.
+    t1 := aq * b
+    t2 := ar * bq
+    t3 := ar * br / 10000
+    m1 := if t1 < 0 { -t1 } else { t1 }
+    m2 := if t2 < 0 { -t2 } else { t2 }
+    m3 := if t3 < 0 { -t3 } else { t3 }
+    mut lim2 := 9223372036854775807 - m2 - m3
+    // Negative side allows |total| <= max+1. The +1 is only formed when
+    // m2+m3 >= 1 (otherwise lim2 == max and +1 would wrap to MIN);
+    // with m2+m3 == 0, |total| = m1 <= max by the aq guard, so no
+    // overflow is possible there.
+    if (a < 0) != (b < 0) && (m2 > 0 || m3 > 0) {
+        lim2 = lim2 + 1
+    }
+    if m1 > lim2 {
+        panic('cuni: dec multiplication overflow')
+    }
+    return t1 + t2 + t3
+}
+fn cuni_dec_div(a i64, b i64) i64 {
+    if b == 0 {
+        panic('cuni: dec division by zero')
+    }
+    min_int := -9223372036854775807 - 1
+    if a == min_int && b == -1 {
+        panic('cuni: dec division overflow')
+    }
+    // trunc(a*10000/b). Split a = q*b + r: result = q*10000 +
+    // trunc(r*10000/b), both terms sharing the sign of a/b.
+    q := a / b
+    r := a % b
+    if q > 922337203685477 || q < -922337203685477 {
+        panic('cuni: dec division overflow')
+    }
+    t1 := q * 10000
+    // trunc(r*10000/b), |r| < |b|.
+    mut t2 := i64(0)
+    if b <= 922337203685477 && b >= -922337203685477 {
+        // |r| < |b| <= max/10000, so r*10000 fits.
+        t2 = r * 10000 / b
+    } else {
+        // |b| > max/10000: split b = d*10000 + e, r = s*d + rd.
+        // r*10000/b = s + (rd*10000 - s*e)/b; the correction f lies in
+        // (-1.000001, 1.000001), so term2 = s + trunc(f) + adj.
+        d := b / 10000
+        e := b % 10000
+        s := r / d
+        rd := r % d
+        x := rd * 10000
+        y := s * e
+        ax := if x < 0 { -x } else { x }
+        ay := if y < 0 { -y } else { y }
+        same := (x >= 0) == (y >= 0)
+        // |b|, MIN-safe (ab == 0 means |b| = 2^63). The i64(0) first
+        // branch pins the if-expression to i64: a bare 0 would infer
+        // int and truncate -b to 32 bits.
+        ab := if b == min_int { i64(0) } else if b < 0 { -b } else { b }
+        // ge: |x| + |y| >= |b| (only meaningful when !same).
+        mut ge := false
+        if !same {
+            if ab == 0 {
+                if ay != 0 {
+                    ge = ax >= -(min_int + ay)
+                }
+            } else {
+                ge = ax >= ab - ay
+            }
+        }
+        mut fzero := false
+        mut fpos := false
+        mut f_int := false
+        if same {
+            fzero = x == y
+            if !fzero {
+                ws := if ax > ay { x > 0 } else { y < 0 }
+                fpos = ws != (b < 0)
+            }
+        } else {
+            // sign(x - y) = sign(x) here (x >= 0 covers x == 0).
+            fpos = (x >= 0) != (b < 0)
+            if ge {
+                // |f| >= 1; f is exactly +-1 iff |x| + |y| == |b|.
+                if ab == 0 {
+                    f_int = ay != 0 && ax == -(min_int + ay)
+                } else {
+                    f_int = ax == ab - ay
+                }
+            }
+        }
+        g := if ge { if fpos { i64(1) } else { i64(-1) } } else { i64(0) }
+        mut adj := i64(0)
+        if !fzero && !f_int {
+            if fpos && s < 0 {
+                adj = i64(1)
+            } else if !fpos && s > 0 {
+                adj = i64(-1)
+            }
+        }
+        t2 = s + g + adj
+    }
+    m1 := if t1 < 0 { -t1 } else { t1 }
+    m2 := if t2 < 0 { -t2 } else { t2 }
+    mut lim := 9223372036854775807 - m2
+    // Negative side allows |total| <= max+1; the +1 is only formed when
+    // m2 >= 1 (otherwise lim == max and +1 would wrap to MIN). With
+    // m2 == 0, |total| = m1 <= max by the q guard, so no overflow is
+    // possible there.
+    if (a < 0) != (b < 0) && m2 > 0 {
+        lim = lim + 1
+    }
+    if m1 > lim {
+        panic('cuni: dec division overflow')
+    }
+    return t1 + t2
+}
+fn cuni_dec_str(v i64) string {
+    s := if v < 0 { '-' } else { '' }
+    // ip/fr via truncating division; abs each part (neither is MIN).
+    ip := v / 10000
+    fr := v % 10000
+    aip := if ip < 0 { -ip } else { ip }
+    afr := if fr < 0 { -fr } else { fr }
+    mut fs := afr.str()
+    for fs.len < 4 {
+        fs = '0' + fs
+    }
+    for fs.len > 1 && fs.ends_with('0') {
+        fs = fs[..fs.len - 1]
+    }
+    return '${s}${aip}.${fs}'
 }
 "#;
 
@@ -305,6 +466,7 @@ impl Emitter {
                                 Ty::Int => "cuni_say_int",
                                 Ty::Str => "cuni_say_str",
                                 Ty::Bool => "cuni_say_bool",
+                                Ty::Dec => "cuni_say_dec",
                             };
                             self.line(&format!("{0}({1})", f, v));
                             return Ok(());
@@ -324,7 +486,17 @@ impl Emitter {
             ExprKind::Bool(b) => Ok((b.to_string(), Ty::Bool)),
             ExprKind::Str(s) => Ok((v_str(s), Ty::Str)),
             ExprKind::Float(_) => Err("float: beyond core subset; refusing".into()),
-            ExprKind::Dec(_) => Err("dec: beyond core subset; refusing".into()),
+            ExprKind::Dec(v) => {
+                // Scaled integer (parser scaled once, ast.rs); narrow seats
+                // refuse out-of-envelope literals at emit (DECIMAL.md §7).
+                if *v > i64::MAX as i128 || *v < -(i64::MAX as i128) {
+                    return Err(format!(
+                        "dec literal `{v}` exceeds this seat's envelope (|scaled| <= {}); refusing",
+                        i64::MAX
+                    ));
+                }
+                Ok((v.to_string(), Ty::Dec))
+            }
             ExprKind::Time(_) => Err("time: beyond core subset; refusing".into()),
             ExprKind::NoneLit => Err("none: beyond core subset; refusing".into()),
             ExprKind::Ident(n) => {
@@ -364,6 +536,30 @@ impl Emitter {
             ExprKind::Binary { op, lhs, rhs } => {
                 let (l, lt) = self.gen_expr(lhs)?;
                 let (r, rt) = self.gen_expr(rhs)?;
+                // dec pairs (docs/DECIMAL.md §3): + / - plain, * / via
+                // helpers (trunc toward zero), % refused, comparisons on
+                // the scaled integers.
+                if lt == Ty::Dec && rt == Ty::Dec {
+                    return match op {
+                        BinOp::Add => Ok((format!("({} + {})", l, r), Ty::Dec)),
+                        BinOp::Sub => Ok((format!("({} - {})", l, r), Ty::Dec)),
+                        BinOp::Mul => Ok((format!("cuni_dec_mul({}, {})", l, r), Ty::Dec)),
+                        BinOp::Div => Ok((format!("cuni_dec_div({}, {})", l, r), Ty::Dec)),
+                        BinOp::Mod => Err("`%` is not defined on `dec`".into()),
+                        BinOp::Eq => Ok((format!("({} == {})", l, r), Ty::Bool)),
+                        BinOp::Ne => Ok((format!("({} != {})", l, r), Ty::Bool)),
+                        BinOp::Lt => Ok((format!("({} < {})", l, r), Ty::Bool)),
+                        BinOp::Gt => Ok((format!("({} > {})", l, r), Ty::Bool)),
+                        BinOp::Le => Ok((format!("({} <= {})", l, r), Ty::Bool)),
+                        BinOp::Ge => Ok((format!("({} >= {})", l, r), Ty::Bool)),
+                        _ => Err(format!("dec `{:?}`: beyond core subset; refusing", op)),
+                    };
+                }
+                // `dec` and `int` never mix (typeck refuses first; this is
+                // defense in depth).
+                if (lt == Ty::Dec) != (rt == Ty::Dec) {
+                    return Err("mixed dec/int: beyond core subset; refusing".into());
+                }
                 match op {
                     BinOp::Add => {
                         if lt == Ty::Str && rt == Ty::Str {
@@ -417,10 +613,10 @@ impl Emitter {
                         Ok((format!("(!{})", v), Ty::Bool))
                     }
                     UnOp::Neg => {
-                        if t != Ty::Int {
-                            return Err("unary `-` on non-int: beyond core subset; refusing".into());
+                        if t != Ty::Int && t != Ty::Dec {
+                            return Err("unary `-` on non-int/dec: beyond core subset; refusing".into());
                         }
-                        Ok((format!("(-{})", v), Ty::Int))
+                        Ok((format!("(-{})", v), t))
                     }
                 }
             }

@@ -26,6 +26,11 @@ enum Ty {
     Int,
     Str,
     Bool,
+    /// Scaled decimal (x10000, DECIMAL.md): stored as a signed 64-bit
+    /// bash integer, envelope |scaled| <= i64::MAX. Bash arithmetic
+    /// wraps silently on overflow, so `*`/`/` go through helpers that
+    /// refuse loudly (see the header).
+    Dec,
 }
 
 fn ty_of(ty: &Type) -> Result<Ty, String> {
@@ -33,6 +38,7 @@ fn ty_of(ty: &Type) -> Result<Ty, String> {
         Type::Named(n) if n == "int" => Ok(Ty::Int),
         Type::Named(n) if n == "str" => Ok(Ty::Str),
         Type::Named(n) if n == "bool" => Ok(Ty::Bool),
+        Type::Named(n) if n == "dec" => Ok(Ty::Dec),
         _ => Err("type beyond core subset; refusing".into()),
     }
 }
@@ -231,6 +237,105 @@ impl Emitter {
         );
         self.out
             .push_str("cuni_mod(){ echo $(( (($1 % $2) + $2) % $2 )); }\n");
+        // Dec helpers. Bash arithmetic is int64 with silent wraparound, so
+        // both use the aq/ar decomposition proven against the V seat's
+        // differential test: every intermediate is <= 19 digits by
+        // construction, and the m1 > lim2 gate (negative side allows
+        // |total| <= max+1) is the exact overflow check. Failure must be
+        // LOUD: `exit 1` inside $( ) is silent (the script continues with
+        // an empty/0 value — measured), so a failure echoes the error,
+        // echoes `1/0` (poisons any enclosing $(( )) with a fatal
+        // division-by-zero), and kills the script with TERM.
+        self.out.push_str(r#"cuni_dec_mul(){
+local a=$1 b=$2 aq ar bq br lim t1 t2 t3 m1 m2 m3 lim2
+if [ "$a" -eq 0 ] || [ "$b" -eq 0 ]; then echo 0; return 0; fi
+aq=$((a / 10000)); ar=$((a - aq * 10000))
+if [ "$b" -eq -9223372036854775808 ]; then lim=0
+elif [ "$b" -lt 0 ]; then lim=$((9223372036854775807 / (0 - b)))
+else lim=$((9223372036854775807 / b)); fi
+if [ "$aq" -gt "$lim" ] || [ "$aq" -lt "$((0 - lim))" ]; then echo "cuni: dec multiplication overflow" >&2; echo "1/0"; kill -TERM $$; exit 1; fi
+bq=$((b / 10000)); br=$((b - bq * 10000))
+t1=$((aq * b)); t2=$((ar * bq)); t3=$((ar * br / 10000))
+m1=$((t1 < 0 ? 0 - t1 : t1)); m2=$((t2 < 0 ? 0 - t2 : t2)); m3=$((t3 < 0 ? 0 - t3 : t3))
+lim2=$((9223372036854775807 - m2 - m3))
+if { [ "$a" -lt 0 ] && [ "$b" -ge 0 ]; } || { [ "$a" -ge 0 ] && [ "$b" -lt 0 ]; }; then
+if [ "$m2" -gt 0 ] || [ "$m3" -gt 0 ]; then lim2=$((lim2 + 1)); fi
+fi
+if [ "$m1" -gt "$lim2" ]; then echo "cuni: dec multiplication overflow" >&2; echo "1/0"; kill -TERM $$; exit 1; fi
+echo $((t1 + t2 + t3))
+}
+cuni_dec_div(){
+local a=$1 b=$2 q r t1 t2 d e s rd x y ax ay ab thr same ge fzero fpos fint ws g adj m1 m2 lim
+if [ "$b" -eq 0 ]; then echo "cuni: dec division by zero" >&2; echo "1/0"; kill -TERM $$; exit 1; fi
+if [ "$a" -eq -9223372036854775808 ] && [ "$b" -eq -1 ]; then echo "cuni: dec division overflow" >&2; echo "1/0"; kill -TERM $$; exit 1; fi
+q=$((a / b)); r=$((a - q * b))
+if [ "$q" -gt 922337203685477 ] || [ "$q" -lt -922337203685477 ]; then echo "cuni: dec division overflow" >&2; echo "1/0"; kill -TERM $$; exit 1; fi
+t1=$((q * 10000)); t2=0
+if [ "$b" -le 922337203685477 ] && [ "$b" -ge -922337203685477 ]; then
+t2=$((r * 10000 / b))
+else
+d=$((b / 10000)); e=$((b - d * 10000))
+s=$((r / d)); rd=$((r - s * d))
+x=$((rd * 10000)); y=$((s * e))
+ax=$((x < 0 ? 0 - x : x)); ay=$((y < 0 ? 0 - y : y))
+if [ "$b" -eq -9223372036854775808 ]; then ab=0
+elif [ "$b" -lt 0 ]; then ab=$((0 - b))
+else ab=$b; fi
+thr=$((ab - ay))
+if { [ "$x" -ge 0 ] && [ "$y" -ge 0 ]; } || { [ "$x" -lt 0 ] && [ "$y" -lt 0 ]; }; then same=1; else same=0; fi
+ge=0; fzero=0; fpos=0; fint=0
+if [ "$same" -eq 1 ]; then
+if [ "$x" -eq "$y" ]; then fzero=1
+else
+if [ "$ax" -gt "$ay" ]; then
+if [ "$x" -gt 0 ]; then ws=1; else ws=0; fi
+else
+if [ "$y" -lt 0 ]; then ws=1; else ws=0; fi
+fi
+if { [ "$ws" -eq 1 ] && [ "$b" -ge 0 ]; } || { [ "$ws" -eq 0 ] && [ "$b" -lt 0 ]; }; then fpos=1; fi
+fi
+else
+if [ "$ab" -eq 0 ]; then
+if [ "$ay" -ne 0 ] && [ "$ax" -ge "$((0 - (-9223372036854775808 + ay)))" ]; then ge=1; fi
+else
+if [ "$ax" -ge "$thr" ]; then ge=1; fi
+fi
+if { [ "$x" -ge 0 ] && [ "$b" -ge 0 ]; } || { [ "$x" -lt 0 ] && [ "$b" -lt 0 ]; }; then fpos=1; fi
+if [ "$ge" -eq 1 ]; then
+if [ "$ab" -eq 0 ]; then
+if [ "$ay" -ne 0 ] && [ "$ax" -eq "$((0 - (-9223372036854775808 + ay)))" ]; then fint=1; fi
+else
+if [ "$ax" -eq "$thr" ]; then fint=1; fi
+fi
+fi
+fi
+g=0
+if [ "$ge" -eq 1 ]; then
+if [ "$fpos" -eq 1 ]; then g=1; else g=-1; fi
+fi
+adj=0
+if [ "$fzero" -eq 0 ] && [ "$fint" -eq 0 ]; then
+if [ "$fpos" -eq 1 ] && [ "$s" -lt 0 ]; then adj=1
+elif [ "$fpos" -eq 0 ] && [ "$s" -gt 0 ]; then adj=-1; fi
+fi
+t2=$((s + g + adj))
+fi
+m1=$((t1 < 0 ? 0 - t1 : t1)); m2=$((t2 < 0 ? 0 - t2 : t2))
+lim=$((9223372036854775807 - m2))
+if { [ "$a" -lt 0 ] && [ "$b" -ge 0 ]; } || { [ "$a" -ge 0 ] && [ "$b" -lt 0 ]; }; then
+if [ "$m2" -gt 0 ]; then lim=$((lim + 1)); fi
+fi
+if [ "$m1" -gt "$lim" ]; then echo "cuni: dec division overflow" >&2; echo "1/0"; kill -TERM $$; exit 1; fi
+echo $((t1 + t2))
+}
+cuni_say_dec(){
+local v=$1 s="" ai af f
+if [ "$v" -lt 0 ]; then s="-"; ai=$((0 - v / 10000)); af=$((0 - v % 10000)); else ai=$((v / 10000)); af=$((v % 10000)); fi
+printf -v f "%04d" "$af"
+while [ "${#f}" -gt 1 ] && [ "${f: -1}" = "0" ]; do f="${f%?}"; done
+printf "%s%d.%s\n" "$s" "$ai" "$f"
+}
+"#);
         self.out.push('\n');
         for code in &fns {
             self.out.push_str(code);
@@ -296,14 +401,31 @@ impl Emitter {
                         Ok(Ty::Str)
                     } else if l == Ty::Int && r == Ty::Int {
                         Ok(Ty::Int)
+                    } else if l == Ty::Dec && r == Ty::Dec {
+                        Ok(Ty::Dec)
                     } else {
                         Err("mixed-type `+`: beyond core subset; refusing".into())
                     }
                 }
-                BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => Ok(Ty::Int),
+                BinOp::Sub | BinOp::Mul | BinOp::Div => {
+                    let l = self.expr_ty(lhs)?;
+                    let r = self.expr_ty(rhs)?;
+                    if l == Ty::Dec && r == Ty::Dec {
+                        Ok(Ty::Dec)
+                    } else {
+                        Ok(Ty::Int)
+                    }
+                }
+                BinOp::Mod => Ok(Ty::Int),
                 _ => Ok(Ty::Bool),
             },
-            ExprKind::Unary { op: UnOp::Neg, .. } => Ok(Ty::Int),
+            ExprKind::Unary { op: UnOp::Neg, expr } => {
+                if self.expr_ty(expr)? == Ty::Dec {
+                    Ok(Ty::Dec)
+                } else {
+                    Ok(Ty::Int)
+                }
+            }
             ExprKind::Unary { op: UnOp::Not, .. } => Ok(Ty::Bool),
             ExprKind::Call { callee, .. } => {
                 let name = match &callee.kind {
@@ -318,6 +440,7 @@ impl Emitter {
                     .map(|(_, r)| *r)
                     .ok_or_else(|| format!("call to unknown function `{name}`: refusing"))
             }
+            ExprKind::Dec(_) => Ok(Ty::Dec),
             _ => Err("unsupported expression: beyond core subset; refusing".into()),
         }
     }
@@ -326,8 +449,13 @@ impl Emitter {
     /// rendering is an arithmetic text (Int/Bool) or a shell word (Str).
     fn typed(&mut self, e: &Expr) -> Result<(String, Ty), String> {
         match &e.kind {
-            ExprKind::Int(_) | ExprKind::Unary { op: UnOp::Neg, .. } => {
-                Ok((self.int_expr(e)?, Ty::Int))
+            ExprKind::Int(_) => Ok((self.int_expr(e)?, Ty::Int)),
+            ExprKind::Unary { op: UnOp::Neg, .. } => {
+                if self.expr_ty(e)? == Ty::Dec {
+                    Ok((self.dec_expr(e)?, Ty::Dec))
+                } else {
+                    Ok((self.int_expr(e)?, Ty::Int))
+                }
             }
             ExprKind::Bool(_) => Ok((self.bool_val(e)?, Ty::Bool)),
             ExprKind::Str(_) => Ok((self.str_word(e)?, Ty::Str)),
@@ -338,6 +466,7 @@ impl Emitter {
                 let v = match t {
                     Ty::Int => emitted,
                     Ty::Bool => emitted,
+                    Ty::Dec => emitted,
                     Ty::Str => format!("\"${{{}}}\"", emitted),
                 };
                 Ok((v, t))
@@ -348,13 +477,22 @@ impl Emitter {
                     let rt = self.expr_ty(rhs)?;
                     if lt == Ty::Str && rt == Ty::Str {
                         Ok((self.str_word(e)?, Ty::Str))
+                    } else if lt == Ty::Dec && rt == Ty::Dec {
+                        Ok((self.dec_expr(e)?, Ty::Dec))
                     } else {
                         Ok((self.int_expr(e)?, Ty::Int))
                     }
                 }
-                BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
-                    Ok((self.int_expr(e)?, Ty::Int))
+                BinOp::Sub | BinOp::Mul | BinOp::Div => {
+                    let lt = self.expr_ty(lhs)?;
+                    let rt = self.expr_ty(rhs)?;
+                    if lt == Ty::Dec && rt == Ty::Dec {
+                        Ok((self.dec_expr(e)?, Ty::Dec))
+                    } else {
+                        Ok((self.int_expr(e)?, Ty::Int))
+                    }
                 }
+                BinOp::Mod => Ok((self.int_expr(e)?, Ty::Int)),
                 _ => Ok((self.bool_val(e)?, Ty::Bool)),
             },
             ExprKind::Unary { op: UnOp::Not, .. } => Ok((self.bool_val(e)?, Ty::Bool)),
@@ -375,11 +513,12 @@ impl Emitter {
                     Ty::Int => self.int_expr(e)?,
                     Ty::Bool => self.bool_val(e)?,
                     Ty::Str => self.str_word(e)?,
+                    Ty::Dec => self.dec_expr(e)?,
                 };
                 Ok((v, ret))
             }
             ExprKind::Float(_) => Err("float: beyond core subset; refusing".into()),
-            ExprKind::Dec(_) => Err("dec: beyond core subset; refusing".into()),
+            ExprKind::Dec(_) => Ok((self.dec_expr(e)?, Ty::Dec)),
             ExprKind::Time(_) => Err("time: beyond core subset; refusing".into()),
             ExprKind::NoneLit => Err("none: beyond core subset; refusing".into()),
             ExprKind::InterpStr(_) => {
@@ -456,6 +595,78 @@ impl Emitter {
         }
     }
 
+    /// Bash arithmetic text for a dec expression (valid inside `$(( ))`).
+    /// `*`/`/` go through the cuni_dec_mul / cuni_dec_div helpers, which
+    /// implement trunc(a*b/10000) / trunc(a*10000/b) exactly with i64-range
+    /// overflow refusal (loud: stderr + kill, so a failure can never
+    /// continue with a silently wrong value — see the header helpers).
+    /// `%` on dec is refused (no dec modulo in the core semantics).
+    fn dec_expr(&mut self, e: &Expr) -> Result<String, String> {
+        match &e.kind {
+            ExprKind::Dec(v) => {
+                // Scaled integer (parser scaled once, ast.rs); narrow seats
+                // refuse out-of-envelope literals at emit (DECIMAL.md §7).
+                if *v > i64::MAX as i128 || *v < -(i64::MAX as i128) {
+                    return Err(format!(
+                        "dec literal `{v}` exceeds this seat's envelope (|scaled| <= {}); refusing",
+                        i64::MAX
+                    ));
+                }
+                Ok(v.to_string())
+            }
+            ExprKind::Ident(n) => {
+                let (t, emitted) = self
+                    .lookup(n)
+                    .ok_or_else(|| format!("unknown variable `{n}`: refusing"))?;
+                if t != Ty::Dec {
+                    return Err(format!(
+                        "variable `{n}` is not a dec: beyond core subset; refusing"
+                    ));
+                }
+                Ok(emitted)
+            }
+            ExprKind::Binary { op, lhs, rhs } => {
+                let l = self.dec_operand(lhs)?;
+                let r = self.dec_operand(rhs)?;
+                match op {
+                    BinOp::Add => Ok(format!("({l} + {r})")),
+                    BinOp::Sub => Ok(format!("({l} - {r})")),
+                    BinOp::Mul => Ok(format!("$(cuni_dec_mul \"$(({l}))\" \"$(({r}))\")")),
+                    BinOp::Div => Ok(format!("$(cuni_dec_div \"$(({l}))\" \"$(({r}))\")")),
+                    _ => Err(format!(
+                        "`{}` is not a dec operator: beyond core subset; refusing",
+                        op_name(op)
+                    )),
+                }
+            }
+            ExprKind::Unary { op, expr } => match op {
+                UnOp::Neg => Ok(format!("(-({}))", self.dec_operand(expr)?)),
+                UnOp::Not => Err("`not` on non-dec: beyond core subset; refusing".into()),
+            },
+            ExprKind::Call { callee, args } => {
+                let (name, _, ret) = self.call_head(callee)?;
+                if ret != Ty::Dec {
+                    return Err(format!(
+                        "call to `{name}` used as dec but returns otherwise; refusing"
+                    ));
+                }
+                let as_ = self.call_args(&name, args)?;
+                Ok(format!("$({} {})", name, as_.join(" ")))
+            }
+            _ => Err("non-dec expression in dec position: beyond core subset; refusing".into()),
+        }
+    }
+
+    /// Like dec_expr but refuses non-dec-typed subexpressions with the core's
+    /// wording.
+    fn dec_operand(&mut self, e: &Expr) -> Result<String, String> {
+        let (v, t) = self.typed(e)?;
+        match t {
+            Ty::Dec => Ok(v),
+            _ => Err("dec operator on non-dec: beyond core subset; refusing".into()),
+        }
+    }
+
     /// A single shell word evaluating to the string.
     fn str_word(&mut self, e: &Expr) -> Result<String, String> {
         match &e.kind {
@@ -522,7 +733,9 @@ impl Emitter {
                 BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
                     let (l, lt) = self.typed(lhs)?;
                     let (r, rt) = self.typed(rhs)?;
-                    if lt == Ty::Int && rt == Ty::Int {
+                    if (lt == Ty::Int && rt == Ty::Int)
+                        || (lt == Ty::Dec && rt == Ty::Dec)
+                    {
                         Ok(format!("(({l}) {} ({r}))", cmp_op(op)))
                     } else if lt == Ty::Str && rt == Ty::Str {
                         // String comparison cannot live inside $(( )); evaluate
@@ -730,6 +943,11 @@ impl Emitter {
                                 }
                                 let (v, vt) = self.typed(args[0].expr())?;
                                 match vt {
+                                    Ty::Dec => {
+                                        self.unit.bl(&format!(
+                                            "cuni_say_dec \"$(( {v} ))\""
+                                        ))
+                                    }
                                     Ty::Int => {
                                         self.unit.bl(&format!("printf '%s\\n' \"$(( {v} ))\""))
                                     }
@@ -769,7 +987,9 @@ impl Emitter {
         // per-function scope; at top level it would be an error.
         let local = if is_let && self.unit.in_func { "local " } else { "" };
         match vt {
-            Ty::Int | Ty::Bool => self.unit.bl(&format!("{local}{emitted}=$(( {v} ))")),
+            Ty::Int | Ty::Bool | Ty::Dec => {
+                self.unit.bl(&format!("{local}{emitted}=$(( {v} ))"))
+            }
             Ty::Str => self.unit.bl(&format!("{local}{emitted}={v}")),
         }
         Ok(())

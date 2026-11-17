@@ -27,6 +27,9 @@ enum Ty {
     Int,
     Str,
     Bool,
+    /// Scaled decimal (x10000, DECIMAL.md): stored as `long long`,
+    /// envelope |scaled| <= i64::MAX.
+    Dec,
 }
 
 fn ty_of(ty: &Type) -> Result<Ty, String> {
@@ -34,6 +37,7 @@ fn ty_of(ty: &Type) -> Result<Ty, String> {
         Type::Named(n) if n == "int" => Ok(Ty::Int),
         Type::Named(n) if n == "str" => Ok(Ty::Str),
         Type::Named(n) if n == "bool" => Ok(Ty::Bool),
+        Type::Named(n) if n == "dec" => Ok(Ty::Dec),
         _ => Err("type beyond core subset; refusing".into()),
     }
 }
@@ -64,6 +68,7 @@ fn decl_of(name: &str, ty: Ty) -> String {
         Ty::Int => format!("long long {};", name),
         Ty::Str => format!("const char *{};", name),
         Ty::Bool => format!("long long {};", name),
+        Ty::Dec => format!("long long {};", name),
     }
 }
 
@@ -72,6 +77,7 @@ fn c_type_of(ty: Ty) -> &'static str {
         Ty::Int => "long long",
         Ty::Str => "const char *",
         Ty::Bool => "long long",
+        Ty::Dec => "long long",
     }
 }
 
@@ -94,6 +100,27 @@ const HEADER: &str = concat!(
     "static void cuni_say_int(long long x) { printf(\"%lld\\n\", x); }\n",
     "static void cuni_say_str(const char *x) { printf(\"%s\\n\", x ? x : \"\"); }\n",
     "static void cuni_say_bool(long long x) { printf(\"%s\\n\", x ? \"True\" : \"False\"); }\n",
+    "\n",
+    "/* Dec (scaled x10000): trunc(a*b/10000) / trunc(a*10000/b), i64 envelope. */\n",
+    "static long long cuni_dec_mul(long long a, long long b) {\n",
+    "    __int128 r = (__int128)a * b / 10000;\n",
+    "    if (r > 9223372036854775807LL || r < -9223372036854775807LL - 1) { fprintf(stderr, \"cuni: dec multiplication overflow\\n\"); exit(1); }\n",
+    "    return (long long)r;\n",
+    "}\n",
+    "static long long cuni_dec_div(long long a, long long b) {\n",
+    "    if (b == 0) { fprintf(stderr, \"cuni: dec division by zero\\n\"); exit(1); }\n",
+    "    __int128 r = (__int128)a * 10000 / b;\n",
+    "    if (r > 9223372036854775807LL || r < -9223372036854775807LL - 1) { fprintf(stderr, \"cuni: dec division overflow\\n\"); exit(1); }\n",
+    "    return (long long)r;\n",
+    "}\n",
+    "static void cuni_say_dec(long long v) {\n",
+    "    unsigned long long u = v < 0 ? (unsigned long long)(-(v + 1)) + 1 : (unsigned long long)v;\n",
+    "    char f[5];\n",
+    "    snprintf(f, sizeof f, \"%04llu\", u % 10000);\n",
+    "    int n = 4;\n",
+    "    while (n > 1 && f[n - 1] == '0') f[--n] = '\\0';\n",
+    "    printf(\"%s%llu.%s\\n\", v < 0 ? \"-\" : \"\", u / 10000, f);\n",
+    "}\n",
     "\n",
 );
 
@@ -480,6 +507,7 @@ impl Emitter {
                                     Ty::Int => "cuni_say_int",
                                     Ty::Str => "cuni_say_str",
                                     Ty::Bool => "cuni_say_bool",
+                                    Ty::Dec => "cuni_say_dec",
                                 };
                                 self.unit.bl(&format!("{}({});", helper, v));
                                 return Ok(());
@@ -500,7 +528,17 @@ impl Emitter {
             ExprKind::Bool(b) => Ok((if *b { "1".into() } else { "0".into() }, Ty::Bool)),
             ExprKind::Str(s) => Ok((c_str(s), Ty::Str)),
             ExprKind::Float(_) => Err("float: beyond core subset; refusing".into()),
-            ExprKind::Dec(_) => Err("dec: beyond core subset; refusing".into()),
+            ExprKind::Dec(v) => {
+                // Scaled integer (parser scaled once, ast.rs); narrow seats
+                // refuse out-of-envelope literals at emit (DECIMAL.md §7).
+                if *v > i64::MAX as i128 || *v < -(i64::MAX as i128) {
+                    return Err(format!(
+                        "dec literal `{v}` exceeds this seat's envelope (|scaled| <= {}); refusing",
+                        i64::MAX
+                    ));
+                }
+                Ok((format!("{}LL", v), Ty::Dec))
+            }
             ExprKind::Time(_) => Err("time: beyond core subset; refusing".into()),
             ExprKind::NoneLit => Err("none: beyond core subset; refusing".into()),
             ExprKind::Ident(n) => {
@@ -548,23 +586,36 @@ impl Emitter {
                             return Ok((format!("cuni_concat({}, {})", l, r), Ty::Str));
                         } else if lt == Ty::Int && rt == Ty::Int {
                             return Ok((format!("({} + {})", l, r), Ty::Int));
+                        } else if lt == Ty::Dec && rt == Ty::Dec {
+                            return Ok((format!("({} + {})", l, r), Ty::Dec));
                         }
                         return Err("mixed-type `+`: beyond core subset; refusing".into());
                     }
                     BinOp::Sub => {
+                        if lt == Ty::Dec && rt == Ty::Dec {
+                            return Ok((format!("({} - {})", l, r), Ty::Dec));
+                        }
                         require_ints(lt, rt, "-")?;
                         Ok((format!("({} - {})", l, r), Ty::Int))
                     }
                     BinOp::Mul => {
+                        if lt == Ty::Dec && rt == Ty::Dec {
+                            return Ok((format!("cuni_dec_mul({}, {})", l, r), Ty::Dec));
+                        }
                         require_ints(lt, rt, "*")?;
                         Ok((format!("({} * {})", l, r), Ty::Int))
                     }
                     BinOp::Div => {
+                        if lt == Ty::Dec && rt == Ty::Dec {
+                            return Ok((format!("cuni_dec_div({}, {})", l, r), Ty::Dec));
+                        }
                         require_ints(lt, rt, "/")?;
                         // C integer division truncates toward zero (CuNi).
                         Ok((format!("({} / {})", l, r), Ty::Int))
                     }
                     BinOp::Mod => {
+                        // `%` is refused on dec (no dec modulo in the core
+                        // semantics); require_ints rejects a Dec operand.
                         require_ints(lt, rt, "%")?;
                         // C's % truncates; the helper floors.
                         Ok((format!("cuni_mod({}, {})", l, r), Ty::Int))
@@ -631,10 +682,10 @@ impl Emitter {
                         Ok((format!("(!{})", v), Ty::Bool))
                     }
                     UnOp::Neg => {
-                        if t != Ty::Int {
-                            return Err("unary `-` on non-int: beyond core subset; refusing".into());
+                        if t != Ty::Int && t != Ty::Dec {
+                            return Err("unary `-` on non-numeric: beyond core subset; refusing".into());
                         }
-                        Ok((format!("(-{})", v), Ty::Int))
+                        Ok((format!("(-{})", v), t))
                     }
                 }
             }

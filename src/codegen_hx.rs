@@ -46,7 +46,7 @@ const SPEC: LangSpec = LangSpec {
     comment: "//",
     // Opens `class Main {`; defs land inside as static functions, then
     // main_open adds `static function main() {` and main_close shuts both.
-    header: "class Main {\nstatic function cuni_say(x:Dynamic, ty:String):Void {\n    if (ty == \"bool\") Sys.println(x ? \"True\" : \"False\"); else Sys.println(Std.string(x));\n}\nstatic function cuni_div(a:Int, b:Int):Int { return Std.int(a / b); }\nstatic function cuni_mod(a:Int, b:Int):Int { return ((a % b) + b) % b; }\n",
+    header: "class Main {\nstatic function cuni_say(x:Dynamic, ty:String):Void {\n    if (ty == \"bool\") Sys.println(x ? \"True\" : \"False\"); else Sys.println(Std.string(x));\n}\nstatic function cuni_div(a:Int, b:Int):Int { return Std.int(a / b); }\nstatic function cuni_mod(a:Int, b:Int):Int { return ((a % b) + b) % b; }\nstatic function cuni_dec_mul(a:Int, b:Int):Int { return Std.int(a * b / 10000); }\nstatic function cuni_dec_div(a:Int, b:Int):Int { if (b == 0) { throw \"cuni: dec division by zero\"; } return Std.int(a * 10000 / b); }\nstatic function cuni_dec_str(v:Int):String { var s = v < 0 ? \"-\" : \"\"; var a = v < 0 ? -v : v; var ip = Std.int(a / 10000); var fr = a % 10000; var f = fr; var digits = 4; while (f != 0 && f % 10 == 0) { f = Std.int(f / 10); digits--; } if (f == 0) { digits = 1; } var fs = Std.string(f); while (fs.length < digits) { fs = \"0\" + fs; } return s + ip + \".\" + fs; }\n",
     main_open: "static function main() {",
     main_close: "}\n}",
     let_fmt: "var {name} = {expr};",
@@ -68,6 +68,13 @@ const SPEC: LangSpec = LangSpec {
     int_div_helper: Some("cuni_div"),
     // Haxe `%` follows the dividend; cuni_mod makes it Python-floored.
     int_mod_helper: Some("cuni_mod"),
+    // dec (docs/DECIMAL.md §3, §6): Haxe Int is 32-bit, so literals are
+    // envelope-checked against i32::MAX (reduced envelope, documented).
+    dec_mul_helper: Some("cuni_dec_mul"),
+    dec_div_helper: Some("cuni_dec_div"),
+    dec_str_helper: Some("cuni_dec_str"),
+    dec_lit_suffix: "",
+    dec_max_abs: Some(2_147_483_647),
     str_eq_op: "==",
     str_ne_op: "!=",
     str_lt_op: "<",

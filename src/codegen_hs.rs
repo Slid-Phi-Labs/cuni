@@ -23,6 +23,7 @@ enum Ty {
     Int,
     Str,
     Bool,
+    Dec,
 }
 
 fn ty_of(t: &Type) -> Result<Ty, String> {
@@ -30,6 +31,7 @@ fn ty_of(t: &Type) -> Result<Ty, String> {
         Type::Named(n) if n == "int" => Ok(Ty::Int),
         Type::Named(n) if n == "str" => Ok(Ty::Str),
         Type::Named(n) if n == "bool" => Ok(Ty::Bool),
+        Type::Named(n) if n == "dec" => Ok(Ty::Dec),
         _ => Err("type beyond core subset; refusing".into()),
     }
 }
@@ -39,6 +41,9 @@ fn hs_ty(ty: Ty) -> &'static str {
         Ty::Int => "Integer",
         Ty::Str => "String",
         Ty::Bool => "Bool",
+        // `dec` is a scaled Integer (docs/DECIMAL.md, scale 10^4);
+        // Haskell Integer is bignum, so the envelope is unbounded.
+        Ty::Dec => "Integer",
     }
 }
 
@@ -244,6 +249,29 @@ cuniSayStr :: String -> IO ()
 cuniSayStr x = putStrLn x
 cuniSayBool :: Bool -> IO ()
 cuniSayBool x = putStrLn (if x then "True" else "False")
+cuniSayDec :: Integer -> IO ()
+cuniSayDec x = putStrLn (cuniDecStr x)
+
+-- dec (docs/DECIMAL.md §3, §6): scaled Integer, scale 10^4. Haskell
+-- Integer is bignum, so the envelope is unbounded. quot truncates
+-- toward zero (CuNi); division by zero raises.
+cuniDecMul :: Integer -> Integer -> Integer
+cuniDecMul a b = (a * b) `quot` 10000
+cuniDecDiv :: Integer -> Integer -> Integer
+cuniDecDiv _ 0 = error "cuni: dec division by zero"
+cuniDecDiv a b = (a * 10000) `quot` b
+cuniDecStr :: Integer -> String
+cuniDecStr v =
+  let s = if v < 0 then "-" else ""
+      a = abs v
+      ip = a `quot` 10000
+      fr = a `mod` 10000
+      digits = show fr
+      fs0 = replicate (4 - length digits) '0' ++ digits
+      strip xs = case xs of [] -> []; [_] -> xs; _ -> if last xs == '0' then strip (init xs) else xs
+      fs = strip fs0
+      fs' = if null fs then "0" else fs
+  in s ++ show ip ++ "." ++ fs'
 
 "#;
 
@@ -272,6 +300,7 @@ impl Gen {
             Ty::Int => "cuniSayInt",
             Ty::Str => "cuniSayStr",
             Ty::Bool => "cuniSayBool",
+            Ty::Dec => "cuniSayDec",
         }
     }
 
@@ -283,7 +312,7 @@ impl Gen {
             ExprKind::Bool(b) => Ok((vec![], if *b { "True" } else { "False" }.to_string(), Ty::Bool)),
             ExprKind::Str(s) => Ok((vec![], hs_str(s), Ty::Str)),
             ExprKind::Float(_) => Err("float: beyond core subset; refusing".into()),
-            ExprKind::Dec(_) => Err("dec: beyond core subset; refusing".into()),
+            ExprKind::Dec(v) => Ok((vec![], v.to_string(), Ty::Dec)),
             ExprKind::Time(_) => Err("time: beyond core subset; refusing".into()),
             ExprKind::NoneLit => Err("none: beyond core subset; refusing".into()),
             ExprKind::Ident(n) => lookup(env, n).map(|(v, t)| (vec![], v, t)),
@@ -328,25 +357,41 @@ impl Gen {
                             (format!("({} ++ {})", l, r), Ty::Str)
                         } else if lt == Ty::Int && rt == Ty::Int {
                             (format!("({} + {})", l, r), Ty::Int)
+                        } else if lt == Ty::Dec && rt == Ty::Dec {
+                            (format!("({} + {})", l, r), Ty::Dec)
                         } else {
                             return Err("mixed-type `+`: beyond core subset; refusing".into());
                         }
                     }
                     BinOp::Sub => {
-                        Self::ints(lt, rt, "-")?;
-                        (format!("({} - {})", l, r), Ty::Int)
+                        let pair = Self::nums(lt, rt, "-")?;
+                        (format!("({} - {})", l, r), pair)
                     }
                     BinOp::Mul => {
-                        Self::ints(lt, rt, "*")?;
-                        (format!("({} * {})", l, r), Ty::Int)
+                        let pair = Self::nums(lt, rt, "*")?;
+                        if pair == Ty::Dec {
+                            // trunc(a*b/10000) toward zero (DECIMAL.md §3).
+                            (format!("(cuniDecMul {} {})", l, r), Ty::Dec)
+                        } else {
+                            (format!("({} * {})", l, r), Ty::Int)
+                        }
                     }
                     // `quot` truncates toward zero (CuNi).
                     BinOp::Div => {
-                        Self::ints(lt, rt, "/")?;
-                        (format!("({} `quot` {})", l, r), Ty::Int)
+                        let pair = Self::nums(lt, rt, "/")?;
+                        if pair == Ty::Dec {
+                            // trunc(a*10000/b) toward zero; b == 0 fails
+                            // loudly in the helper (DECIMAL.md §3).
+                            (format!("(cuniDecDiv {} {})", l, r), Ty::Dec)
+                        } else {
+                            (format!("({} `quot` {})", l, r), Ty::Int)
+                        }
                     }
                     // `mod` is Python-floored (CuNi).
                     BinOp::Mod => {
+                        if lt == Ty::Dec || rt == Ty::Dec {
+                            return Err("`%` is not defined on `dec`".into());
+                        }
                         Self::ints(lt, rt, "%")?;
                         (format!("({} `mod` {})", l, r), Ty::Int)
                     }
@@ -395,10 +440,10 @@ impl Gen {
                         Ok((pre, format!("(not {})", v), Ty::Bool))
                     }
                     UnOp::Neg => {
-                        if t != Ty::Int {
-                            return Err("unary `-` on non-int: beyond core subset; refusing".into());
+                        if t != Ty::Int && t != Ty::Dec {
+                            return Err("unary `-` on non-int/dec: beyond core subset; refusing".into());
                         }
-                        Ok((pre, format!("(negate {})", v), Ty::Int))
+                        Ok((pre, format!("(negate {})", v), t))
                     }
                 }
             }
@@ -411,6 +456,17 @@ impl Gen {
             return Err("condition must be bool; refusing".into());
         }
         Ok((pre, v))
+    }
+
+    /// Int-or-Dec pair: returns the shared numeric type, refuses mixes.
+    fn nums(l: Ty, r: Ty, op: &str) -> Result<Ty, String> {
+        if l == Ty::Int && r == Ty::Int {
+            Ok(Ty::Int)
+        } else if l == Ty::Dec && r == Ty::Dec {
+            Ok(Ty::Dec)
+        } else {
+            Err(format!("`{}` on mixed types: beyond core subset; refusing", op))
+        }
     }
 
     fn ints(l: Ty, r: Ty, op: &str) -> Result<(), String> {
@@ -438,7 +494,7 @@ impl Gen {
     }
 
     fn ord(l: Ty, r: Ty, op: &str) -> Result<(), String> {
-        if (l == Ty::Int && r == Ty::Int) || (l == Ty::Str && r == Ty::Str) {
+        if l == r && (l == Ty::Int || l == Ty::Dec || l == Ty::Str) {
             Ok(())
         } else {
             Err(format!("`{}` across mismatched types: beyond core subset; refusing", op))

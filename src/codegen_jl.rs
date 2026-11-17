@@ -47,7 +47,13 @@ fn jl_str(s: &str) -> String {
 
 const SPEC: LangSpec = LangSpec {
     comment: "#",
-    header: "function cuni_say(x, ty)\n    if ty == \"bool\"\n        println(x ? \"True\" : \"False\")\n    else\n        println(x)\n    end\nend\n",
+    header: "function cuni_say(x, ty)\n    if ty == \"bool\"\n        println(x ? \"True\" : \"False\")\n    else\n        println(x)\n    end\nend\nfunction cuni_dec_mul(a, b)\n    r = div(BigInt(a) * b, 10000)\n    if r > 9223372036854775807 || r < -9223372036854775808\n        throw(OverflowError(\"cuni: dec multiplication overflow\"))\n    end\n    Int64(r)\nend\nfunction cuni_dec_div(a, b)\n    if b == 0\n        throw(ErrorException(\"cuni: dec division by zero\"))\n    end\n    r = div(BigInt(a) * 10000, b)\n    if r > 9223372036854775807 || r < -9223372036854775808\n        throw(OverflowError(\"cuni: dec division overflow\"))\n    end\n    Int64(r)\nend\nfunction cuni_dec_str(v)\n    s = v < 0 ? \"-\" : \"\"\n    a = v < 0 ? (v == typemin(Int64) ? (UInt64(1) << 63) : UInt64(-v)) : UInt64(v)\n    ip = div(a, 10000)\n    fr = a % 10000\n    fs = lpad(string(fr), 4, \"0\")\n    while endswith(fs, \"0\")\n        fs = fs[1:end-1]\n    end\n    if isempty(fs)\n        fs = \"0\"\n    end\n    return s * string(ip) * \".\" * fs\nend\n",
+    // NOTE (2026-11-17 fix): `checked_mul` is not defined in Main (Julia
+    // 1.13; UndefVarError) and is over-strict anyway — it refuses a*b
+    // overflowing Int64 even when a*b/10000 fits (e.g. max*10000). The
+    // helpers now use BigInt intermediates with an explicit i64-envelope
+    // check. dec_str takes the absolute value in UInt64 so typemin
+    // formats instead of throwing (abs(typemin) overflows).
     main_open: "let",
     main_close: "end",
     let_fmt: "{name} = {expr}",
@@ -69,6 +75,14 @@ const SPEC: LangSpec = LangSpec {
     int_div_helper: Some("div"),
     // Julia `%` is rem (sign of dividend); mod() is Python-floored (CuNi).
     int_mod_helper: Some("mod"),
+    // dec (docs/DECIMAL.md §3, §6): Int64 seat; BigInt intermediates with
+    // an explicit i64-envelope check refuse overflow loudly, div by zero
+    // throws ErrorException.
+    dec_mul_helper: Some("cuni_dec_mul"),
+    dec_div_helper: Some("cuni_dec_div"),
+    dec_str_helper: Some("cuni_dec_str"),
+    dec_lit_suffix: "",
+    dec_max_abs: Some(9_223_372_036_854_775_807),
     str_eq_op: "==",
     str_ne_op: "!=",
     str_lt_op: "<",

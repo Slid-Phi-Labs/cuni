@@ -25,6 +25,7 @@ enum Ty {
     Int,
     Str,
     Bool,
+    Dec,
 }
 
 fn ty_of(ty: &Type) -> Result<Ty, String> {
@@ -32,6 +33,7 @@ fn ty_of(ty: &Type) -> Result<Ty, String> {
         Type::Named(n) if n == "int" => Ok(Ty::Int),
         Type::Named(n) if n == "str" => Ok(Ty::Str),
         Type::Named(n) if n == "bool" => Ok(Ty::Bool),
+        Type::Named(n) if n == "dec" => Ok(Ty::Dec),
         _ => Err("type beyond core subset; refusing".into()),
     }
 }
@@ -82,6 +84,8 @@ fn decl_of(name: &str, ty: Ty) -> String {
         Ty::Int => format!("{} : Long_Long_Integer;", name),
         Ty::Str => format!("{} : Unbounded_String;", name),
         Ty::Bool => format!("{} : Boolean;", name),
+        // `dec` is a scaled Long_Long_Integer (docs/DECIMAL.md, scale 10^4).
+        Ty::Dec => format!("{} : Long_Long_Integer;", name),
     }
 }
 
@@ -90,6 +94,7 @@ fn ada_type_of(ty: Ty) -> &'static str {
         Ty::Int => "Long_Long_Integer",
         Ty::Str => "Unbounded_String",
         Ty::Bool => "Boolean",
+        Ty::Dec => "Long_Long_Integer",
     }
 }
 
@@ -116,6 +121,168 @@ const HEADER: &str = concat!(
     "         return \"False\";\n",
     "      end if;\n",
     "   end Bool_Img;\n",
+    "   -- dec (docs/DECIMAL.md §3, §6): scaled Long_Long_Integer, scale\n",
+    "   -- 10^4. GNAT has no 128-bit integer, so mul/div stay in 64 bits\n",
+    "   -- via the Aq/Ar split (A = Aq*10000 + Ar, |Ar| < 10000) with\n",
+    "   -- exact overflow guards; overflow and division by zero raise\n",
+    "   -- Constraint_Error (loud). `/` truncates toward zero (CuNi).\n",
+    "   function Cuni_Dec_Mul (A, B : Long_Long_Integer) return Long_Long_Integer is\n",
+    "      Aq : constant Long_Long_Integer := A / 10000;\n",
+    "      Ar : constant Long_Long_Integer := A rem 10000;\n",
+    "      Bq : constant Long_Long_Integer := B / 10000;\n",
+    "      Br : constant Long_Long_Integer := B rem 10000;\n",
+    "      Lim : Long_Long_Integer;\n",
+    "      T1, T2, T3 : Long_Long_Integer;\n",
+    "      M1, M2, M3 : Long_Long_Integer;\n",
+    "      Lim2 : Long_Long_Integer;\n",
+    "   begin\n",
+    "      if A = 0 or B = 0 then\n",
+    "         return 0;\n",
+    "      end if;\n",
+    "      if B = Long_Long_Integer'First then\n",
+    "         Lim := 0;\n",
+    "      elsif B < 0 then\n",
+    "         Lim := Long_Long_Integer'Last / (-B);\n",
+    "      else\n",
+    "         Lim := Long_Long_Integer'Last / B;\n",
+    "      end if;\n",
+    "      if Aq > Lim or Aq < -Lim then\n",
+    "         raise Constraint_Error with \"cuni: dec multiplication overflow\";\n",
+    "      end if;\n",
+    "      T1 := Aq * B;\n",
+    "      T2 := Ar * Bq;\n",
+    "      T3 := Ar * Br / 10000;\n",
+    "      M1 := (if T1 < 0 then -T1 else T1);\n",
+    "      M2 := (if T2 < 0 then -T2 else T2);\n",
+    "      M3 := (if T3 < 0 then -T3 else T3);\n",
+    "      Lim2 := Long_Long_Integer'Last - M2 - M3;\n",
+    "      if (A < 0) /= (B < 0) and then (M2 > 0 or M3 > 0) then\n",
+    "         Lim2 := Lim2 + 1;\n",
+    "      end if;\n",
+    "      if M1 > Lim2 then\n",
+    "         raise Constraint_Error with \"cuni: dec multiplication overflow\";\n",
+    "      end if;\n",
+    "      return T1 + T2 + T3;\n",
+    "   end Cuni_Dec_Mul;\n",
+    "   function Cuni_Dec_Div (A, B : Long_Long_Integer) return Long_Long_Integer is\n",
+    "      Q, R : Long_Long_Integer;\n",
+    "      T1, T2 : Long_Long_Integer;\n",
+    "      M1, M2 : Long_Long_Integer;\n",
+    "      Lim : Long_Long_Integer;\n",
+    "   begin\n",
+    "      if B = 0 then\n",
+    "         raise Constraint_Error with \"cuni: dec division by zero\";\n",
+    "      end if;\n",
+    "      if A = Long_Long_Integer'First and B = -1 then\n",
+    "         raise Constraint_Error with \"cuni: dec division overflow\";\n",
+    "      end if;\n",
+    "      Q := A / B;\n",
+    "      R := A rem B;\n",
+    "      if Q > 922337203685477 or Q < -922337203685477 then\n",
+    "         raise Constraint_Error with \"cuni: dec division overflow\";\n",
+    "      end if;\n",
+    "      T1 := Q * 10000;\n",
+    "      if B <= 922337203685477 and B >= -922337203685477 then\n",
+    "         T2 := R * 10000 / B;\n",
+    "      else\n",
+    "         declare\n",
+    "            D : constant Long_Long_Integer := B / 10000;\n",
+    "            E : constant Long_Long_Integer := B rem 10000;\n",
+    "            S : constant Long_Long_Integer := R / D;\n",
+    "            Rd : constant Long_Long_Integer := R rem D;\n",
+    "            X : constant Long_Long_Integer := Rd * 10000;\n",
+    "            Y : constant Long_Long_Integer := S * E;\n",
+    "            Ax : constant Long_Long_Integer := (if X < 0 then -X else X);\n",
+    "            Ay : constant Long_Long_Integer := (if Y < 0 then -Y else Y);\n",
+    "            Same : constant Boolean := (X >= 0) = (Y >= 0);\n",
+    "            Ab : Long_Long_Integer;\n",
+    "            Ge : Boolean := False;\n",
+    "            Fzero : Boolean := False;\n",
+    "            Fpos : Boolean := False;\n",
+    "            F_Int : Boolean := False;\n",
+    "            G : Long_Long_Integer := 0;\n",
+    "            Adj : Long_Long_Integer := 0;\n",
+    "         begin\n",
+    "            if B = Long_Long_Integer'First then\n",
+    "               Ab := 0;\n",
+    "            elsif B < 0 then\n",
+    "               Ab := -B;\n",
+    "            else\n",
+    "               Ab := B;\n",
+    "            end if;\n",
+    "            if not Same then\n",
+    "               if Ab = 0 then\n",
+    "                  if Ay /= 0 then\n",
+    "                     Ge := Ax >= -(Long_Long_Integer'First + Ay);\n",
+    "                  end if;\n",
+    "               else\n",
+    "                  Ge := Ax >= Ab - Ay;\n",
+    "               end if;\n",
+    "            end if;\n",
+    "            if Same then\n",
+    "               Fzero := X = Y;\n",
+    "               if not Fzero then\n",
+    "                  declare\n",
+    "                     Ws : Boolean;\n",
+    "                  begin\n",
+    "                     if Ax > Ay then\n",
+    "                        Ws := X > 0;\n",
+    "                     else\n",
+    "                        Ws := Y < 0;\n",
+    "                     end if;\n",
+    "                     Fpos := Ws /= (B < 0);\n",
+    "                  end;\n",
+    "               end if;\n",
+    "            else\n",
+    "               Fpos := (X >= 0) /= (B < 0);\n",
+    "               if Ge then\n",
+    "                  if Ab = 0 then\n",
+    "                     F_Int := Ay /= 0 and then Ax = -(Long_Long_Integer'First + Ay);\n",
+    "                  else\n",
+    "                     F_Int := Ax = Ab - Ay;\n",
+    "                  end if;\n",
+    "               end if;\n",
+    "            end if;\n",
+    "            if Ge then\n",
+    "               G := (if Fpos then 1 else -1);\n",
+    "            end if;\n",
+    "            if not Fzero and not F_Int then\n",
+    "               if Fpos and S < 0 then\n",
+    "                  Adj := 1;\n",
+    "               elsif not Fpos and S > 0 then\n",
+    "                  Adj := -1;\n",
+    "               end if;\n",
+    "            end if;\n",
+    "            T2 := S + G + Adj;\n",
+    "         end;\n",
+    "      end if;\n",
+    "      M1 := (if T1 < 0 then -T1 else T1);\n",
+    "      M2 := (if T2 < 0 then -T2 else T2);\n",
+    "      Lim := Long_Long_Integer'Last - M2;\n",
+    "      if (A < 0) /= (B < 0) and then M2 > 0 then\n",
+    "         Lim := Lim + 1;\n",
+    "      end if;\n",
+    "      if M1 > Lim then\n",
+    "         raise Constraint_Error with \"cuni: dec division overflow\";\n",
+    "      end if;\n",
+    "      return T1 + T2;\n",
+    "   end Cuni_Dec_Div;\n",
+    "   function Cuni_Dec_Str (V : Long_Long_Integer) return String is\n",
+    "      S : constant String := (if V < 0 then \"-\" else \"\");\n",
+    "      Ip : constant Long_Long_Integer := V / 10000;\n",
+    "      Fr : constant Long_Long_Integer := V rem 10000;\n",
+    "      Aip : constant Long_Long_Integer := (if Ip < 0 then -Ip else Ip);\n",
+    "      Afr : constant Long_Long_Integer := (if Fr < 0 then -Fr else Fr);\n",
+    "      Fr_Digits : constant String := Img (Afr);\n",
+    "      Padded : String (1 .. 4) := (others => '0');\n",
+    "      Last : Natural := 4;\n",
+    "   begin\n",
+    "      Padded (4 - Fr_Digits'Length + 1 .. 4) := Fr_Digits;\n",
+    "      while Last > 1 and then Padded (Last) = '0' loop\n",
+    "         Last := Last - 1;\n",
+    "      end loop;\n",
+    "      return S & Img (Aip) & \".\" & Padded (1 .. Last);\n",
+    "   end Cuni_Dec_Str;\n",
 );
 
 /// One scoping unit (the main procedure or one function): declarations are
@@ -289,9 +456,13 @@ impl Emitter {
         if f.name.eq_ignore_ascii_case("cuni_main") || f.name.eq_ignore_ascii_case("main") {
             return Err("def main: collides with the Ada main procedure; refusing".into());
         }
-        if f.name.eq_ignore_ascii_case("img") || f.name.eq_ignore_ascii_case("bool_img") {
+        if f.name.eq_ignore_ascii_case("img") || f.name.eq_ignore_ascii_case("bool_img")
+            || f.name.eq_ignore_ascii_case("cuni_dec_mul")
+            || f.name.eq_ignore_ascii_case("cuni_dec_div")
+            || f.name.eq_ignore_ascii_case("cuni_dec_str")
+        {
             return Err(format!(
-                "def {}: collides with the Img/Bool_Img helpers (Ada is case-insensitive); refusing",
+                "def {}: collides with the Img/Bool_Img/Cuni_Dec helpers (Ada is case-insensitive); refusing",
                 f.name
             ));
         }
@@ -551,6 +722,9 @@ impl Emitter {
                                     Ty::Bool => {
                                         self.unit.bl(&format!("Put_Line (Bool_Img ({}));", v))
                                     }
+                                    Ty::Dec => {
+                                        self.unit.bl(&format!("Put_Line (Cuni_Dec_Str ({}));", v))
+                                    }
                                 }
                                 return Ok(());
                             }
@@ -573,7 +747,17 @@ impl Emitter {
             )),
             ExprKind::Str(s) => Ok((ada_str(s), Ty::Str)),
             ExprKind::Float(_) => Err("float: beyond core subset; refusing".into()),
-            ExprKind::Dec(_) => Err("dec: beyond core subset; refusing".into()),
+            ExprKind::Dec(v) => {
+                // Scaled integer (parser scaled once, ast.rs); narrow seats
+                // refuse out-of-envelope literals at emit (DECIMAL.md §7).
+                if *v > i64::MAX as i128 || *v < -(i64::MAX as i128) {
+                    return Err(format!(
+                        "dec literal `{v}` exceeds this seat's envelope (|scaled| <= {}); refusing",
+                        i64::MAX
+                    ));
+                }
+                Ok((v.to_string(), Ty::Dec))
+            }
             ExprKind::Time(_) => Err("time: beyond core subset; refusing".into()),
             ExprKind::NoneLit => Err("none: beyond core subset; refusing".into()),
             ExprKind::Ident(n) => {
@@ -615,6 +799,30 @@ impl Emitter {
             ExprKind::Binary { op, lhs, rhs } => {
                 let (l, lt) = self.gen_expr(lhs)?;
                 let (r, rt) = self.gen_expr(rhs)?;
+                // dec pairs (docs/DECIMAL.md §3): + / - plain, * / via
+                // helpers (trunc toward zero), % refused, comparisons on
+                // the scaled integers.
+                if lt == Ty::Dec && rt == Ty::Dec {
+                    return match op {
+                        BinOp::Add => Ok((format!("({} + {})", l, r), Ty::Dec)),
+                        BinOp::Sub => Ok((format!("({} - {})", l, r), Ty::Dec)),
+                        BinOp::Mul => Ok((format!("Cuni_Dec_Mul ({}, {})", l, r), Ty::Dec)),
+                        BinOp::Div => Ok((format!("Cuni_Dec_Div ({}, {})", l, r), Ty::Dec)),
+                        BinOp::Mod => Err("`%` is not defined on `dec`".into()),
+                        BinOp::Eq => Ok((format!("({} = {})", l, r), Ty::Bool)),
+                        BinOp::Ne => Ok((format!("({} /= {})", l, r), Ty::Bool)),
+                        BinOp::Lt => Ok((format!("({} < {})", l, r), Ty::Bool)),
+                        BinOp::Gt => Ok((format!("({} > {})", l, r), Ty::Bool)),
+                        BinOp::Le => Ok((format!("({} <= {})", l, r), Ty::Bool)),
+                        BinOp::Ge => Ok((format!("({} >= {})", l, r), Ty::Bool)),
+                        _ => Err(format!("dec `{:?}`: beyond core subset; refusing", op)),
+                    };
+                }
+                // `dec` and `int` never mix (typeck refuses first; this is
+                // defense in depth).
+                if (lt == Ty::Dec) != (rt == Ty::Dec) {
+                    return Err("mixed dec/int: beyond core subset; refusing".into());
+                }
                 match op {
                     BinOp::Add => {
                         if lt == Ty::Str && rt == Ty::Str {
@@ -676,10 +884,10 @@ impl Emitter {
                         Ok((format!("(not {})", v), Ty::Bool))
                     }
                     UnOp::Neg => {
-                        if t != Ty::Int {
-                            return Err("unary `-` on non-int: beyond core subset; refusing".into());
+                        if t != Ty::Int && t != Ty::Dec {
+                            return Err("unary `-` on non-int/dec: beyond core subset; refusing".into());
                         }
-                        Ok((format!("(-{})", v), Ty::Int))
+                        Ok((format!("(-{})", v), t))
                     }
                 }
             }

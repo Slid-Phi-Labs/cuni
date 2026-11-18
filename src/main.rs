@@ -1,8 +1,10 @@
 mod ast;
 mod audit;
 mod bank;
+mod bundle;
 mod check;
 mod checks;
+mod cost;
 mod codegen_c;
 mod codegen_core;
 mod codegen_cadence;
@@ -115,6 +117,12 @@ Usage (the frozen surface):
                              [--verbose] [--timeout <secs>] [--keep]
   cuni emit <file.cuni> [emit flags...]   (same as the bare-file form below)
   cuni run <file.cuni> [--lang py] [--timeout <secs>]
+  cuni cost <file.cuni> [--out manifest.json] [--reps N] [--tdp-watts W]
+  cuni cost --check <manifest> --budget <budget> --source <file.cuni>
+  cuni cost --init-budget [--out budget.json]
+  cuni bundle <file.cuni> --spec spec.json --out DIR [--seat rs]
+            [--sign keyfile] [--timeout secs]
+  cuni admit <dir> [--env env.json] [--timeout secs]
   cuni version
   cuni <file.cuni> [--emit-py <out.py>] [--emit-go <out.go>] [--emit-js <out.js>]
                [--emit <seat> <out>] [--emit-all <dir>] [--emit-top50 <dir>] [--list-langs]
@@ -153,6 +161,18 @@ Extra commands (explicit; unchanged behavior):
           runs by extension (.py/.go/.rs/.java/.sql/.js) and must print
           byte-identical stdout. PASS or REFUSE is always filed.
           `audit --gen-key [name]` mints an Ed25519 receipt-signing keypair.
+  cost    Cost-carrying binaries (55-ideas D1 / #34): measure a program
+          and write a per-function cost manifest (time, memory, energy,
+          I/O) re-measured on every run; `cost --check` is the deploy gate
+          that FAILS the deploy on budget breach, like a type error.
+          `cost --init-budget` writes a template budget.
+  bundle  Spec-carrying artifacts (55-ideas B10 / #21): build a bundle
+          (source + artifact + spec + signed proof bound to the binary
+          hash). `--sign <keyfile>` is required.
+  admit   Admission controller: re-verify a bundle against live
+          environment state. Refuses spec-less artifacts, tampered files,
+          invalid signatures, stale proofs, and live re-run divergence.
+          Exit 0 ADMIT, 1 REFUSE.
 
 Exit codes:
   0  exactness pass / success
@@ -219,6 +239,15 @@ fn main() -> ExitCode {
     }
     if args[0] == "audit" {
         return cmd_audit(&args[1..]);
+    }
+    if args[0] == "cost" {
+        return cost::cmd_cost(&args[1..]);
+    }
+    if args[0] == "bundle" {
+        return bundle::cmd_bundle(&args[1..]);
+    }
+    if args[0] == "admit" {
+        return bundle::cmd_admit(&args[1..]);
     }
 
     cmd_compile(&args)

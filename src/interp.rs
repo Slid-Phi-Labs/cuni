@@ -3,6 +3,70 @@
 
 use crate::ast::*;
 use std::collections::HashMap;
+use std::time::Instant;
+
+/// One observed invocation of a user-defined function (or `<top>`).
+///
+/// `dur_ns` is inclusive wall time (callees included); `io_bytes` is stdout
+/// written while this call was the innermost frame; `rss_delta_bytes` is the
+/// change in process RSS across the call (Linux, page-granular — see
+/// [`rss_now`]; 0 on other platforms).
+#[derive(Clone, Debug, Default)]
+pub struct FnSample {
+    pub name: String,
+    pub dur_ns: u64,
+    pub io_bytes: u64,
+    pub rss_delta_bytes: i64,
+}
+
+/// Cost profile of one [`run_profiled`] execution.
+#[derive(Clone, Debug, Default)]
+pub struct Profile {
+    /// One entry per observed call, in completion order.
+    pub samples: Vec<FnSample>,
+    /// Wall time of the whole run (ns, warmup excluded by the caller).
+    pub wall_ns: u64,
+    /// Peak RSS (bytes) observed during the run (Linux only, else 0).
+    pub peak_rss_bytes: u64,
+}
+
+struct ProfFrame {
+    name: String,
+    start: Instant,
+    io_bytes: u64,
+    rss_start: u64,
+}
+
+#[derive(Default)]
+struct ProfState {
+    samples: Vec<FnSample>,
+    stack: Vec<ProfFrame>,
+    peak_rss_bytes: u64,
+}
+
+/// Resident set size of this process in bytes.
+///
+/// Linux: `/proc/self/statm` field 2 (resident pages) × 4096. Page-granular
+/// by construction — a function that allocates less than one page reads as a
+/// 0-byte delta, which the cost manifest reports honestly as 0. Other
+/// platforms: 0 (method recorded as unavailable in the manifest).
+#[cfg(target_os = "linux")]
+fn rss_now() -> u64 {
+    std::fs::read_to_string("/proc/self/statm")
+        .ok()
+        .and_then(|s| {
+            s.split_whitespace()
+                .nth(1)
+                .and_then(|t| t.parse::<u64>().ok())
+        })
+        .map(|pages| pages.saturating_mul(4096))
+        .unwrap_or(0)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn rss_now() -> u64 {
+    0
+}
 
 #[derive(Clone, Debug, PartialEq)]
 enum Val {
@@ -40,9 +104,26 @@ struct Vm<'a> {
     typs: HashMap<String, &'a TypDecl>,
     enums: HashMap<String, Vec<String>>,
     out: String,
+    /// Profiling state. `None` = plain [`run`]: zero overhead, exact old
+    /// behavior. `Some` = [`run_profiled`]: per-call frames are pushed in
+    /// [`Vm::call`] and a `<top>` frame covers top-level statements.
+    prof: Option<ProfState>,
 }
 
 pub fn run(program: &Program) -> Result<String, String> {
+    run_inner(program, false).map(|(out, _)| out)
+}
+
+/// Profiled run: identical semantics to [`run`], plus a per-function cost
+/// profile. The program is executed once; callers that need stable
+/// percentiles repeat this (see `cost::measure`). A failing program returns
+/// `Err` and no profile — a cost manifest is only ever written for a run
+/// that succeeded.
+pub fn run_profiled(program: &Program) -> Result<(String, Profile), String> {
+    run_inner(program, true)
+}
+
+fn run_inner(program: &Program, profile: bool) -> Result<(String, Profile), String> {
     if program.items.iter().any(|i| matches!(i, Item::Ext(_))) {
         return Err("cuni run refuses `ext` (not portable). Proof is `cuni check`; seat emit is `cuni run --lang py`".into());
     }
@@ -51,6 +132,11 @@ pub fn run(program: &Program) -> Result<String, String> {
         typs: HashMap::new(),
         enums: HashMap::new(),
         out: String::new(),
+        prof: if profile {
+            Some(ProfState::default())
+        } else {
+            None
+        },
     };
     for item in &program.items {
         match item {
@@ -70,16 +156,58 @@ pub fn run(program: &Program) -> Result<String, String> {
         }
     }
     let mut env: HashMap<String, Val> = HashMap::new();
+    let wall_start = Instant::now();
+    if profile {
+        // Top-level statements run inside a `<top>` frame so their time,
+        // `say` bytes and RSS delta are attributed, not dropped.
+        vm.prof.as_mut().unwrap().stack.push(ProfFrame {
+            name: "<top>".to_string(),
+            start: Instant::now(),
+            io_bytes: 0,
+            rss_start: rss_now(),
+        });
+    }
+    let mut run_err: Option<String> = None;
     for item in &program.items {
         if let Item::Stmt(s) = item {
-            match vm.stmt(s, &mut env)? {
-                Flow::Next => {}
-                Flow::Ret(_) => break,
-                Flow::Fail(v) => return Err(format!("fail: {}", vm.fmt(&v))),
+            match vm.stmt(s, &mut env) {
+                Ok(Flow::Next) => {}
+                Ok(Flow::Ret(_)) => break,
+                Ok(Flow::Fail(v)) => {
+                    run_err = Some(format!("fail: {}", vm.fmt(&v)));
+                    break;
+                }
+                Err(e) => {
+                    run_err = Some(e);
+                    break;
+                }
             }
         }
     }
-    Ok(vm.out)
+    let mut prof_out = Profile::default();
+    if profile {
+        let st = vm.prof.as_mut().unwrap();
+        if let Some(fr) = st.stack.pop() {
+            let dur_ns = fr.start.elapsed().as_nanos() as u64;
+            let rss_end = rss_now();
+            st.peak_rss_bytes = st.peak_rss_bytes.max(rss_end);
+            st.samples.push(FnSample {
+                name: fr.name,
+                dur_ns,
+                io_bytes: fr.io_bytes,
+                rss_delta_bytes: rss_end.saturating_sub(fr.rss_start) as i64,
+            });
+        }
+        prof_out = Profile {
+            samples: std::mem::take(&mut st.samples),
+            wall_ns: wall_start.elapsed().as_nanos() as u64,
+            peak_rss_bytes: st.peak_rss_bytes.max(rss_now()),
+        };
+    }
+    if let Some(e) = run_err {
+        return Err(e);
+    }
+    Ok((vm.out, prof_out))
 }
 
 impl<'a> Vm<'a> {
@@ -378,8 +506,16 @@ impl<'a> Vm<'a> {
             match fname.as_str() {
                 "say" => {
                     let v = av.first().cloned().unwrap_or(Val::None);
-                    self.out.push_str(&self.fmt(&v));
+                    let text = self.fmt(&v);
+                    // +1: the newline `say` appends — I/O is bytes on the wire.
+                    let nbytes = text.len() as u64 + 1;
+                    self.out.push_str(&text);
                     self.out.push('\n');
+                    if let Some(p) = self.prof.as_mut() {
+                        if let Some(fr) = p.stack.last_mut() {
+                            fr.io_bytes += nbytes;
+                        }
+                    }
                     return Ok(Ok(Val::None));
                 }
                 "range" => {
@@ -503,14 +639,54 @@ impl<'a> Vm<'a> {
                 for (p, v) in f.params.iter().zip(av.into_iter()) {
                     local.insert(p.name.clone(), v);
                 }
+                // Profiler frame: pushed only when profiling. With `prof`
+                // None this block is skipped and the body below behaves
+                // exactly as before (same exits, same values).
+                if self.prof.is_some() {
+                    self.prof.as_mut().unwrap().stack.push(ProfFrame {
+                        name: f.name.clone(),
+                        start: Instant::now(),
+                        io_bytes: 0,
+                        rss_start: rss_now(),
+                    });
+                }
+                // Restructured from early `return`s so the frame is popped
+                // on every exit path; the outcome is identical to the
+                // original code (Ret → value, Fail → Fail, fallthrough →
+                // None, stmt error → Err).
+                let mut outcome: Result<Result<Val, Flow>, String> = Ok(Ok(Val::None));
                 for s in &f.body {
-                    match self.stmt(s, &mut local)? {
-                        Flow::Next => {}
-                        Flow::Ret(v) => return Ok(Ok(v)),
-                        Flow::Fail(v) => return Ok(Err(Flow::Fail(v))),
+                    match self.stmt(s, &mut local) {
+                        Ok(Flow::Next) => {}
+                        Ok(Flow::Ret(v)) => {
+                            outcome = Ok(Ok(v));
+                            break;
+                        }
+                        Ok(Flow::Fail(v)) => {
+                            outcome = Ok(Err(Flow::Fail(v)));
+                            break;
+                        }
+                        Err(e) => {
+                            outcome = Err(e);
+                            break;
+                        }
                     }
                 }
-                return Ok(Ok(Val::None));
+                if self.prof.is_some() {
+                    let st = self.prof.as_mut().unwrap();
+                    if let Some(fr) = st.stack.pop() {
+                        let dur_ns = fr.start.elapsed().as_nanos() as u64;
+                        let rss_end = rss_now();
+                        st.peak_rss_bytes = st.peak_rss_bytes.max(rss_end);
+                        st.samples.push(FnSample {
+                            name: fr.name,
+                            dur_ns,
+                            io_bytes: fr.io_bytes,
+                            rss_delta_bytes: rss_end.saturating_sub(fr.rss_start) as i64,
+                        });
+                    }
+                }
+                return outcome;
             }
             return Err(format!("undefined function `{fname}`"));
         }

@@ -1,0 +1,5 @@
+def double(n: int) -> int do
+    ret n * 2
+end
+
+say(double(21))

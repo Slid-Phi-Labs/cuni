@@ -72,7 +72,7 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     hex_of(&h.finalize())
 }
 
-fn hex_of(bytes: &[u8]) -> String {
+pub(crate) fn hex_of(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {
@@ -82,7 +82,7 @@ fn hex_of(bytes: &[u8]) -> String {
     s
 }
 
-fn unhex(s: &str) -> Result<Vec<u8>, String> {
+pub(crate) fn unhex(s: &str) -> Result<Vec<u8>, String> {
     if s.len() % 2 != 0 {
         return Err("hex string has odd length".into());
     }

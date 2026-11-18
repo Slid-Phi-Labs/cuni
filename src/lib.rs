@@ -13,6 +13,7 @@ mod typeck;
 pub mod audit;
 
 pub use interp::run;
+pub use interp::{run_profiled, FnSample, Profile};
 
 /// Parse and evaluate CuNi source in-process. No emit, no `use` modules.
 pub fn run_source(src: &str) -> Result<String, String> {

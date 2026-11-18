@@ -36,3 +36,7 @@ __pycache__/
 **/*sell-all*
 dist/
 c-driver/build/
+
+# Secrets — never commit.
+.env
+.env.*

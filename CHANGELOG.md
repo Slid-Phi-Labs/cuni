@@ -13,6 +13,18 @@ Protocol v1.1.1 · Install: `cargo install cuni` · Studio: https://cuni-studio.
 
 ## [Unreleased]
 
+- Cost-carrying binaries (55-ideas D1 / #34): `cuni cost <file.cuni>`
+  measures a per-function cost manifest (time, memory, energy, I/O) on the
+  reference interpreter seat, re-measured on every run; `cuni cost --check`
+  is the deploy gate that FAILS on budget breach, stale manifest, unknown
+  budget function, or unverifiable energy. `cuni cost --init-budget`
+  writes a template budget. Formats + semantics: `docs/DEPLOY_GATES.md`.
+- Spec-carrying artifacts (55-ideas B10 / #21): `cuni bundle` builds a
+  bundle (source + artifact + spec + signed proof bound to the binary
+  hash; `--sign` required); `cuni admit` re-verifies the proof against
+  live environment state and refuses spec-less artifacts, tampered files,
+  invalid signatures, and live re-run divergence. Formats + semantics:
+  `docs/DEPLOY_GATES.md`.
 - Audited CI checks (version/license coherence, secret scan) — workflow staged; requires a token with `workflow` scope to land
 
 ---

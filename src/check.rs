@@ -167,7 +167,7 @@ pub struct RunFail {
     pub toolchain_missing: bool,
 }
 
-fn run_target(lang: &Lang, artifact: &Path, timeout: Duration) -> Result<String, RunFail> {
+pub(crate) fn run_target(lang: &Lang, artifact: &Path, timeout: Duration) -> Result<String, RunFail> {
     let plan = emit::exec_plan(lang, artifact);
     if let Some((cmd, args)) = plan.compile {
         run_blocking(&cmd, &args, timeout)?;

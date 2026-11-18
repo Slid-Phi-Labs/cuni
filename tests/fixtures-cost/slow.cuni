@@ -1,0 +1,11 @@
+def burn(n: int) -> int do
+    mut total = 0
+    mut i = 0
+    whl i < n do
+        total = total + i
+        i = i + 1
+    end
+    ret total
+end
+
+say(burn(500000))

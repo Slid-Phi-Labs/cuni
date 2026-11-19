@@ -1,17 +1,31 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# CuNi release matrix: on tag push v*, build the four release binaries,
-# package each as cuni-{version}-{target}.tar.gz (binary at archive root —
-# this must match [package.metadata.binstall] pkg-url/bin-dir/pkg-fmt in
+# CuNi release matrix: on tag push v*, or workflow_dispatch of an
+# existing tag, build the four release binaries, package each as
+# cuni-{version}-{target}.tar.gz (binary at archive root — this must
+# match [package.metadata.binstall] pkg-url/bin-dir/pkg-fmt in
 # Cargo.toml), checksum, and attach everything to the GitHub release.
+#
+# workflow_dispatch checks out the given tag and publishes to that
+# tag. It does not move or recreate the tag. Use this when the
+# workflow file has changed after the tag was pushed.
 name: release
 
 on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and attach a GitHub release for (e.g. v0.10.2). The tag is not moved."
+        required: true
+        type: string
 
 permissions:
   contents: write
+
+env:
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
 
 jobs:
   build:
@@ -25,21 +39,26 @@ jobs:
             os: ubuntu-latest
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
+          # macos-15 is arm64; the Intel target needs the Intel image.
+          # macos-14 was retired on 2026-11-02.
           - target: x86_64-apple-darwin
-            os: macos-14
+            os: macos-15-intel
           - target: aarch64-apple-darwin
-            os: macos-14
+            os: macos-15
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
 
       - name: tag matches Cargo.toml version
         run: |
-          tag="${GITHUB_REF_NAME#v}"
+          tag="${RELEASE_TAG#v}"
           pkg=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)
           if [ "$tag" != "$pkg" ]; then
             echo "tag v$tag does not match Cargo.toml version $pkg" >&2
             exit 1
           fi
+          echo "Building cuni $tag from $(git rev-parse HEAD)"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -59,7 +78,7 @@ jobs:
 
       - name: package tarball + checksum
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          version="${RELEASE_TAG#v}"
           target="${{ matrix.target }}"
           name="cuni-${version}-${target}"
           mkdir -p "pkg/${name}"
@@ -87,8 +106,12 @@ jobs:
       - name: merge checksums
         run: cat SHA256SUMS-*.txt > CHECKSUMS.txt && cat CHECKSUMS.txt
 
+      # tag_name is the existing tag. target_commitish is omitted on
+      # purpose: GitHub ignores it when the tag already exists, and we
+      # must not create or move v* tags from a later workflow commit.
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
           files: |
             cuni-*.tar.gz
             CHECKSUMS.txt

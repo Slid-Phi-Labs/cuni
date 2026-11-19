@@ -62,7 +62,7 @@ jobs:
       - name: Install deferred-seat toolchains (clojure, elixir+escript, swipl)
         run: |
           sudo apt-get update && sudo apt-get install -y clojure elixir swi-prolog
-          clojure -e '(println (clojure-version))' && elixir --version && escript -e 'io:format("escript ok~n").' && swipl --version
+          clojure -e '(println (clojure-version))' && elixir --version && command -v escript && erl -noshell -eval 'io:format("escript ok~n"), halt().' && swipl --version
 
       - name: Build
         run: cargo build --verbose

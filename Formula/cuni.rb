@@ -22,22 +22,22 @@ class Cuni < Formula
   on_macos do
     on_arm do
       url "https://github.com/ceedot-rock/cuni/releases/download/v0.10.2/cuni-0.10.2-aarch64-apple-darwin.tar.gz"
-      sha256 "2407a58430a34b1886a5f01fb05ca264cae54084bab6d1e6c759ac615ae9b40d"
+      sha256 "2888e2e07a6b99aa4e4f5661e7b1df91b41fac3caeab1eb87404f785d3362db8"
     end
     on_intel do
       url "https://github.com/ceedot-rock/cuni/releases/download/v0.10.2/cuni-0.10.2-x86_64-apple-darwin.tar.gz"
-      sha256 "022eb305fe4100bbf21305e6fc6957f78fe3b7a4d6f2db77a0a90f072e836a15"
+      sha256 "86e3098bce55d6bc8d0c32af21e039187be74e3df658b5a0ed51c8d8d55a5940"
     end
   end
 
   on_linux do
     on_arm do
       url "https://github.com/ceedot-rock/cuni/releases/download/v0.10.2/cuni-0.10.2-aarch64-unknown-linux-gnu.tar.gz"
-      sha256 "52a26cbcc0f88820327b6938b0e97ed3da9eddf9c3b8fd2c2563ffce875bd468"
+      sha256 "0b82543b0eda7915e983345e5ed7fbea48953822f5408033fa24f02ac722ec17"
     end
     on_intel do
       url "https://github.com/ceedot-rock/cuni/releases/download/v0.10.2/cuni-0.10.2-x86_64-unknown-linux-gnu.tar.gz"
-      sha256 "873521d5c8dfd83b45efeca85ead4dceb271763fb65066271cd1cd616a250069"
+      sha256 "1e4998b5b5852c1f4d79b307ae73e0ed9bce17cf73f3122aa3f9edd5dde77905"
     end
   end
 

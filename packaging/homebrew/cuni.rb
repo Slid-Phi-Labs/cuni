@@ -14,28 +14,28 @@
 class Cuni < Formula
   desc "CuNi — write once, print many languages; Python/Go/JS must match"
   homepage "https://cuni-studio.fly.dev/"
-  version "0.10.0"
+  version "0.10.1"
   license "AGPL-3.0-or-later"
 
   on_macos do
     on_arm do
-      url "https://github.com/ceedot-rock/cuni/releases/download/v0.10.0/cuni-0.10.0-aarch64-apple-darwin.tar.gz"
-      sha256 "9422406446e92c007dc1081a43ba1dfc45f8d8906b15faff3732b470eab2eea2"
+      url "https://github.com/ceedot-rock/cuni/releases/download/v0.10.1/cuni-0.10.1-aarch64-apple-darwin.tar.gz"
+      sha256 "2407a58430a34b1886a5f01fb05ca264cae54084bab6d1e6c759ac615ae9b40d"
     end
     on_intel do
-      url "https://github.com/ceedot-rock/cuni/releases/download/v0.10.0/cuni-0.10.0-x86_64-apple-darwin.tar.gz"
-      sha256 "ddc77bea045ff17e81ffd425eb81fb8b6e0754d8d9413ade0a8e6081300ec156"
+      url "https://github.com/ceedot-rock/cuni/releases/download/v0.10.1/cuni-0.10.1-x86_64-apple-darwin.tar.gz"
+      sha256 "022eb305fe4100bbf21305e6fc6957f78fe3b7a4d6f2db77a0a90f072e836a15"
     end
   end
 
   on_linux do
     on_arm do
-      url "https://github.com/ceedot-rock/cuni/releases/download/v0.10.0/cuni-0.10.0-aarch64-unknown-linux-gnu.tar.gz"
-      sha256 "97d2168947cc6abe60804a2acdbf373c5884a0c702ccb219e6b53059b88c98ca"
+      url "https://github.com/ceedot-rock/cuni/releases/download/v0.10.1/cuni-0.10.1-aarch64-unknown-linux-gnu.tar.gz"
+      sha256 "52a26cbcc0f88820327b6938b0e97ed3da9eddf9c3b8fd2c2563ffce875bd468"
     end
     on_intel do
-      url "https://github.com/ceedot-rock/cuni/releases/download/v0.10.0/cuni-0.10.0-x86_64-unknown-linux-gnu.tar.gz"
-      sha256 "2d0c569b72ed6ed6e7d45abaf5fe3f19534be3bcda7da243f0f82a1e5f7f74bd"
+      url "https://github.com/ceedot-rock/cuni/releases/download/v0.10.1/cuni-0.10.1-x86_64-unknown-linux-gnu.tar.gz"
+      sha256 "873521d5c8dfd83b45efeca85ead4dceb271763fb65066271cd1cd616a250069"
     end
   end
 
@@ -44,6 +44,6 @@ class Cuni < Formula
   end
 
   test do
-    assert_match "cuni 0.10.0", shell_output("#{bin}/cuni version")
+    assert_match "cuni #{version}", shell_output("#{bin}/cuni version")
   end
 end

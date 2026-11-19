@@ -1,6 +1,6 @@
 # CuNi + Agent-Rider – Current Status
 
-**Last updated**: 2026-11-18 (ET) · **v0.10.1 tagged** · `cuni run` is a check seat · Studio → Rider loop live (Fly)
+**Last updated**: 2026-11-18 (ET) · **v0.10.2 tagged** · `cuni run` is a check seat · Studio → Rider loop live (Fly)
 
 ## Vision
 Exact multi-runtime agents, coordinated.
@@ -24,8 +24,8 @@ Exact multi-runtime agents, coordinated.
   - Studio UI surfaces contract **count**, recent **id / sourceHash / registeredAt / status**, and a Rider link (prefers `health.rider.remote_url`)  
 - **Health**: `/api/health` exposes `rider.register`, `rider.list`, `rider.remote`, `rider.remote_url`, plus `lang_count`  
 - **Flagship proofs**: exactness (identical stdout or refuse) + `link` interop + Agent `spend` skill  
-- **Packaging**: Homebrew formula + binstall metadata advanced to **v0.10.1** — see [`docs/PACKAGING.md`](PACKAGING.md) + `packaging/homebrew/cuni.rb`  
-  Preferred install today: prebuilt tarball from the [v0.10.1 release](https://github.com/Slid-Phi-Labs/cuni/releases/tag/v0.10.1) (x86_64/aarch64 × Linux/macOS), or `cargo binstall --git https://github.com/Slid-Phi-Labs/cuni --version 0.10.1`
+- **Packaging**: Homebrew formula + binstall metadata advanced to **v0.10.2** — see [`docs/PACKAGING.md`](PACKAGING.md) + `packaging/homebrew/cuni.rb`  
+  Preferred install today: prebuilt tarball from the [v0.10.2 release](https://github.com/Slid-Phi-Labs/cuni/releases/tag/v0.10.2) (x86_64/aarch64 × Linux/macOS), or `cargo binstall --git https://github.com/Slid-Phi-Labs/cuni --version 0.10.2`
 
 ## Exactness stays sacred
 A CuNi program either produces the same behavior on every supported target, or it **refuses**. There is **no approximate mode**. Type and exactness failures now carry concrete fix-its in CLI + Studio (still refuse — never soften the gate).

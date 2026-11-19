@@ -5,7 +5,7 @@
  "site": {
   "name": "CuNi Studio",
   "url": "https://spl-cuni-studio.fly.dev",
-  "description": "CuNi 0.10.1: one program, same result on 53 listed targets, or it refuses. The same source can also compile to a deployable EVM smart contract. Bank arm: paste N, get X. Studio publishes exact policies into Agent^Rider."
+  "description": "CuNi 0.10.2: one program, same result on 53 listed targets, or it refuses. The same source can also compile to a deployable EVM smart contract. Bank arm: paste N, get X. Studio publishes exact policies into Agent^Rider."
  },
  "protocol": "https://spl-cuni-studio.fly.dev/.well-known/cuni-protocol.json",
  "mcp": [

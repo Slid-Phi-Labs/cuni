@@ -51,7 +51,7 @@
   },
   "bank": {
     "kind": "arm",
-    "note": "paste N, get X. ingest \u2192 emit \u2192 prove. v1 --from py|cuni. 144 langs remains cuni check on the deposit \u2014 not 144 ingest parsers.",
+    "note": "paste N, get X. ingest \u2192 emit \u2192 prove. v1 --from py|cuni. the 53-target catalog is checked by cuni check on the deposit \u2014 not 53 ingest parsers.",
     "paste": "POST https://cuni-studio.fly.dev/api/bank",
     "ui": "https://cuni-studio.fly.dev/bank",
     "law": "https://github.com/ceedot-rock/cuni/blob/master/docs/BANK.md",

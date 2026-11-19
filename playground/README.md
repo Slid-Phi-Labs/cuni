@@ -45,6 +45,7 @@ CUNI_PLAYGROUND_HOST=127.0.0.1 python3 playground/server.py
 | Method | Path | Body | Role |
 |--------|------|------|------|
 | GET | `/api/health` | — | toolchain + book counts |
+| GET | `/api/version` | — | `{version, targets, commit}`: the cuni version, catalog size, and the git commit this Studio was built from |
 | GET | `/api/examples` | — | `examples/*.cuni` |
 | POST | `/api/emit` | `{source}` | emit only |
 | POST | `/api/check` | `{source}` | emit + `cuni check` |

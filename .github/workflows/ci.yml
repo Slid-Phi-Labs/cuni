@@ -74,7 +74,7 @@ jobs:
 
 
       - name: Studio citizen PASS shape smoke
-        run: python3 -m unittest playground.test_citizen_pass -v
+        run: python3 -m unittest playground.test_citizen_pass playground.test_api_version -v
 
       - name: Test
         run: cargo test --verbose

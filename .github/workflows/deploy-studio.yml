@@ -1,13 +1,25 @@
 name: Deploy Studio
 
+# This repo is the only place Studio deploys from. CuNIverse does not deploy it.
+
 on:
   push:
     branches: [master]
     paths:
+      # The Studio image builds the cuni binary from src/ and ships examples/,
+      # so a change to any of these changes what Studio serves.
       - 'playground/**'
+      - 'src/**'
+      - 'examples/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
       - 'fly.toml'
       - '.github/workflows/deploy-studio.yml'
   workflow_dispatch:  # allows manual trigger from GitHub UI
+
+concurrency:
+  group: deploy-studio
+  cancel-in-progress: false
 
 jobs:
   deploy:
@@ -20,6 +32,22 @@ jobs:
         uses: superfly/flyctl-actions/setup-flyctl@master
 
       - name: Deploy
-        run: flyctl deploy --config fly.toml --remote-only
+        run: flyctl deploy --config fly.toml --remote-only --build-arg GIT_SHA=${{ github.sha }}
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+      - name: Check /api/version reports this commit
+        run: |
+          app=$(sed -n 's/^app = "\(.*\)"/\1/p' fly.toml)
+          url="https://${app}.fly.dev/api/version"
+          for i in 1 2 3 4 5 6 7 8 9 10; do
+            body=$(curl -fsS "$url" || true)
+            echo "$body"
+            if echo "$body" | grep -q "\"commit\": \"${GITHUB_SHA}\""; then
+              echo "Studio at $url is serving ${GITHUB_SHA}"
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "::error::$url never reported commit ${GITHUB_SHA}"
+          exit 1

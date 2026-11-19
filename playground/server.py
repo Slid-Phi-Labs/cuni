@@ -180,6 +180,54 @@ def find_cuni() -> Path:
     )
 
 
+def build_sha() -> str | None:
+    """Git commit this Studio image was built from.
+
+    The deploy workflow passes GIT_SHA as a Docker build arg and the Dockerfile
+    stores it in CUNI_BUILD_SHA. A local checkout falls back to `git rev-parse`.
+    """
+    for key in ("CUNI_BUILD_SHA", "GIT_SHA"):
+        val = (os.environ.get(key) or "").strip()
+        if val and val != "unknown":
+            return val
+    try:
+        p = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if p.returncode == 0 and p.stdout.strip():
+            return p.stdout.strip()
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def version_info() -> dict:
+    """What GET /api/version returns: the CLI version, catalog size, build commit."""
+    version = None
+    err = None
+    try:
+        p = run_cmd([str(find_cuni()), "version"])
+        out = (p.stdout or "").strip()
+        if p.returncode == 0 and out.startswith("cuni "):
+            version = out.split(" ", 1)[1].strip()
+        else:
+            err = f"`cuni version` said: {out or (p.stderr or '').strip()}"
+    except Exception as e:  # noqa: BLE001
+        err = str(e)
+    return {
+        "ok": version is not None,
+        "name": "CuNi Studio",
+        "version": version,
+        "targets": len(list_langs()),
+        "commit": build_sha(),
+        "error": err,
+    }
+
+
 def bank_paste(source: str, from_lang: str, to_lang: str) -> dict:
     """Paste N, get X. Ingest → emit → prove via `cuni bank paste`."""
     from_lang = (from_lang or "py").strip().lower()
@@ -709,6 +757,8 @@ class Handler(SimpleHTTPRequestHandler):
                     },
                 },
             )
+        if path == "/api/version":
+            return self._json(200, version_info())
         if path == "/api/examples":
             return self._json(200, {"examples": list_examples()})
         if path == "/api/langs":
@@ -1386,6 +1436,7 @@ def main() -> None:
     print("  POST /api/rider/register  |  GET /api/rider/registered  (Studio Rider stub)")
     print("  GET/POST /api/notelog   |  /api/criticbook")
     print("  GET /api/langs   emit catalog (exactness runs every id)")
+    print("  GET /api/version  CLI version, target count, build commit")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

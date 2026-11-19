@@ -23,6 +23,10 @@ ENV CUNI_BIN=/usr/local/bin/cuni \
     CUNI_PLAYGROUND_MAX_CONCURRENT=2 \
     PATH="/usr/local/go/bin:/usr/bin:$PATH"
 
+# The deploy workflow passes the commit SHA so GET /api/version can report it.
+ARG GIT_SHA=unknown
+ENV CUNI_BUILD_SHA=$GIT_SHA
+
 VOLUME ["/data"]
 EXPOSE 8787
 CMD ["python3", "playground/server.py"]

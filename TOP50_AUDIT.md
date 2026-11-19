@@ -1,7 +1,7 @@
 # CuNi Top-50 Audit — native vs Python-lowered (2026-10-02)
 
 `--emit-top50` boundary confirmed: `src/main.rs:955` — `langs::LANGS.iter().take(50)`.
-Catalog total: 144 entries (`src/langs.rs`).
+Catalog total: 144 entries when this audit was written (`src/langs.rs`). It is 53 today; see CHANGELOG.
 
 ## Current native seats (12)
 

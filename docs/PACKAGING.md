@@ -1,74 +1,57 @@
-# CuNi packaging (v0.1.10)
+# CuNi packaging (v0.10.1)
 
-**Goal**: installable `cuni` binary without cloning the full repo.  
-**Status**: **v0.1.10**. Preferred path: `cargo install cuni`. Git tag and Linux x86_64 GitHub Release assets match. Broader target matrix still needs the release workflow.
+**Goal**: install `cuni` without cloning the repo.
+**Status**: **v0.10.1**. The tag, `Cargo.toml`, crates.io, and the GitHub release all say 0.10.1. The release has prebuilt binaries for Linux and macOS on x86_64 and aarch64, plus `CHECKSUMS.txt`.
 
 ## One-command install
 
 ```bash
 cargo install cuni
 # or from git:
-cargo install --git https://github.com/ceedot-rock/cuni --tag v0.1.10
+cargo install --git https://github.com/Slid-Phi-Labs/cuni --tag v0.10.1
 ```
 
-Requires a Rust toolchain. After install, `cuni --help` and `cuni check examples/full.cuni` work if the examples are present (or clone just for the suite).
+Needs a Rust toolchain. After install, `cuni version` prints `cuni 0.10.1`.
 
-## Prebuilt Linux binary (v0.1.10)
+## Prebuilt binaries (v0.10.1)
 
-GitHub Release [v0.1.10](https://github.com/ceedot-rock/cuni/releases/tag/v0.1.10) ships:
+GitHub release [v0.10.1](https://github.com/Slid-Phi-Labs/cuni/releases/tag/v0.10.1) ships one tarball per target, each with a single `cuni` binary at the root:
 
-| Asset | Notes |
-|-------|--------|
-| `cuni-0.1.10-x86_64-unknown-linux-gnu.tar.gz` | single `cuni` binary at tarball root |
-| `cuni-0.1.10-x86_64-unknown-linux-gnu.tar.gz.sha256` | checksum |
+| Target triple | Asset name |
+|---------------|------------|
+| `x86_64-unknown-linux-gnu` | `cuni-0.10.1-x86_64-unknown-linux-gnu.tar.gz` |
+| `aarch64-unknown-linux-gnu` | `cuni-0.10.1-aarch64-unknown-linux-gnu.tar.gz` |
+| `x86_64-apple-darwin` | `cuni-0.10.1-x86_64-apple-darwin.tar.gz` |
+| `aarch64-apple-darwin` | `cuni-0.10.1-aarch64-apple-darwin.tar.gz` |
+| | `CHECKSUMS.txt` (sha256 for all four) |
 
 ```bash
-curl -sL https://github.com/ceedot-rock/cuni/releases/download/v0.1.10/cuni-0.1.10-x86_64-unknown-linux-gnu.tar.gz \
-  | tar -xz && ./cuni --help
+curl -sL https://github.com/Slid-Phi-Labs/cuni/releases/download/v0.10.1/cuni-0.10.1-x86_64-unknown-linux-gnu.tar.gz \
+  | tar -xz && ./cuni version
 ```
+
+The release workflow (`.github/workflows/release.yml`) builds these on every `v*` tag.
 
 ## Local release binary
 
 ```bash
-git clone https://github.com/ceedot-rock/cuni.git && cd cuni
+git clone https://github.com/Slid-Phi-Labs/cuni.git && cd cuni
 cargo build --release
 # → target/release/cuni
 ```
 
-Helper: [`packaging/scripts/build-release-assets.sh`](../packaging/scripts/build-release-assets.sh) `0.1.10`
-
 ## cargo-binstall
 
-`Cargo.toml` includes `[package.metadata.binstall]` aimed at:
+`Cargo.toml` includes `[package.metadata.binstall]` pointing at:
 
 ```text
 {repo}/releases/download/v{version}/cuni-{version}-{target}.tar.gz
 ```
 
 ```bash
-cargo binstall cuni
+cargo binstall --git https://github.com/Slid-Phi-Labs/cuni --version 0.10.1
 ```
-
-Today only **linux-gnu x86_64** is uploaded; other triples need the release matrix.
-
-### Release asset naming
-
-| Target triple | Asset name |
-|---------------|------------|
-| `x86_64-unknown-linux-gnu` | `cuni-0.1.10-x86_64-unknown-linux-gnu.tar.gz` |
-| `aarch64-unknown-linux-gnu` | `cuni-0.1.10-aarch64-unknown-linux-gnu.tar.gz` (pending workflow) |
-| `x86_64-apple-darwin` | `cuni-0.1.10-x86_64-apple-darwin.tar.gz` (pending workflow) |
-| `aarch64-apple-darwin` | `cuni-0.1.10-aarch64-apple-darwin.tar.gz` (pending workflow) |
-
-Each tarball contains a single `cuni` binary at the root.
 
 ## Homebrew
 
-Formula: [`packaging/homebrew/cuni.rb`](../packaging/homebrew/cuni.rb) — points at the **v0.1.10** source tarball.
-
-```bash
-brew install --build-from-source ./packaging/homebrew/cuni.rb
-```
-
-**Next packaging actions**  
-1. GHA matrix for the remaining three target binaries + checksums on each tag.
+Formula: [`Formula/cuni.rb`](../Formula/cuni.rb) (copy in [`packaging/homebrew/cuni.rb`](../packaging/homebrew/cuni.rb)). It installs the prebuilt v0.10.1 binary, with sha256 values taken from the release's `CHECKSUMS.txt`. There is no tap yet; the formula is ready to move into one.

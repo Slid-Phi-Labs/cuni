@@ -60,13 +60,13 @@ That turns exactness into working infrastructure:
   <a href="https://spl-cuni-studio.fly.dev/"><img src="https://img.shields.io/badge/playground-live-3dd68c.svg" alt="Playground live" /></a>
   <a href="https://github.com/ceedot-rock/cuni/actions/workflows/exactness.yml"><img src="https://github.com/ceedot-rock/cuni/actions/workflows/exactness.yml/badge.svg" alt="Exactness" /></a>
   <a href="https://github.com/ceedot-rock/cuni/actions/workflows/ci.yml"><img src="https://github.com/ceedot-rock/cuni/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
-  <a href="https://github.com/Slid-Phi-Labs/cuni/releases/tag/v0.10.1"><img src="https://img.shields.io/badge/version-0.10.1-cyan.svg" alt="v0.10.1" /></a>
+  <a href="https://github.com/Slid-Phi-Labs/cuni/releases/tag/v0.10.2"><img src="https://img.shields.io/badge/version-0.10.2-cyan.svg" alt="v0.10.2" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0--or--Commercial-blue.svg" alt="AGPL-3.0-or-later OR Commercial" /></a>
 </p>
 
 **One source. Emit every coding language. Exactness still runs Python, JavaScript, and Go — or the compiler refuses.** Receipts name the program by `source_hash`, not by path.
 
-CuNi is a small language with a hard exactness contract: a program either produces the same behavior on every supported target, or it does not compile. No approximate mode. `--emit-all` writes the catalog of coding languages. CuNi compiles one source into all 53 catalog entries. Forty-five of the top 50 — Python, Go, JavaScript, TypeScript, C, C++, C#, Java, Kotlin, Scala, Rust, Ruby, PHP, Lua, Perl, R, Julia, Elixir, Erlang, Haskell, OCaml, F#, Lisp, Clojure, Dart, Zig, Nim, Crystal, D, V, Ada, Pascal, Fortran, COBOL, Prolog, SQL, Assembly, Solidity, Groovy, Objective-C, Bash, PowerShell, Awk, Tcl, and Haxe — build through their real toolchains (Solidity compiles to a deployable EVM contract via solc); the other 5 (MATLAB and Visual Basic, which have no free Linux toolchain, plus Swift, Hack, and Smalltalk, which have no installable Linux toolchain) emit Python under a language-specific file extension and run under python3, so every target's output can actually be compared. **`cuni check` runs the money-seat gate (py, rs, go, java, sql, js): byte-identical stdout everywhere, or the program refuses to compile. `cuni check --all` runs the full 53-entry catalog.** Free hosted **[CuNi Studio](https://spl-cuni-studio.fly.dev/)** (Playground + Agent mode). Open source under AGPL-3.0-or-later, or a paid commercial grant ([LICENSE](LICENSE)), v0.10.1.
+CuNi is a small language with a hard exactness contract: a program either produces the same behavior on every supported target, or it does not compile. No approximate mode. `--emit-all` writes the catalog of coding languages. CuNi compiles one source into all 53 catalog entries. Forty-five of the top 50 — Python, Go, JavaScript, TypeScript, C, C++, C#, Java, Kotlin, Scala, Rust, Ruby, PHP, Lua, Perl, R, Julia, Elixir, Erlang, Haskell, OCaml, F#, Lisp, Clojure, Dart, Zig, Nim, Crystal, D, V, Ada, Pascal, Fortran, COBOL, Prolog, SQL, Assembly, Solidity, Groovy, Objective-C, Bash, PowerShell, Awk, Tcl, and Haxe — build through their real toolchains (Solidity compiles to a deployable EVM contract via solc); the other 5 (MATLAB and Visual Basic, which have no free Linux toolchain, plus Swift, Hack, and Smalltalk, which have no installable Linux toolchain) emit Python under a language-specific file extension and run under python3, so every target's output can actually be compared. **`cuni check` runs the money-seat gate (py, rs, go, java, sql, js): byte-identical stdout everywhere, or the program refuses to compile. `cuni check --all` runs the full 53-entry catalog.** Free hosted **[CuNi Studio](https://spl-cuni-studio.fly.dev/)** (Playground + Agent mode). Open source under AGPL-3.0-or-later, or a paid commercial grant ([LICENSE](LICENSE)), v0.10.2.
 > **Exactness contract:** a CuNi program with no `ext` blocks compiles to identical behavior on every supported target — or it **refuses to compile**.
 
 **Current focus:** Studio → Rider publish/register loop is live; Agent-mode `spend` skill (speech → exactness → multi-runtime). Status: [`docs/STATUS.md`](docs/STATUS.md).
@@ -158,7 +158,7 @@ cargo build --release
   <img src="assets/link-demo.gif" alt="CuNi link demo: Go server, Python JS Go clients all print hello Cee x3" width="720" />
 </p>
 
-Tutorial: [`docs/LINK_TUTORIAL.md`](docs/LINK_TUTORIAL.md) · source: [`examples/link.cuni`](examples/link.cuni) · [Release notes](https://github.com/Slid-Phi-Labs/cuni/releases/tag/v0.10.1)
+Tutorial: [`docs/LINK_TUTORIAL.md`](docs/LINK_TUTORIAL.md) · source: [`examples/link.cuni`](examples/link.cuni) · [Release notes](https://github.com/Slid-Phi-Labs/cuni/releases/tag/v0.10.2)
 
 ### 30s demo (exactness)
 
@@ -176,15 +176,15 @@ One program → Python / Go / JavaScript / Java / C / C++ / Rust — identical `
 ```bash
 # Prebuilt binary (recommended) — pick your platform tarball from
 # https://github.com/Slid-Phi-Labs/cuni/releases
-#   cuni-0.10.1-x86_64-unknown-linux-gnu.tar.gz
-#   cuni-0.10.1-aarch64-unknown-linux-gnu.tar.gz
-#   cuni-0.10.1-x86_64-apple-darwin.tar.gz
-#   cuni-0.10.1-aarch64-apple-darwin.tar.gz
-tar xzf cuni-0.10.1-<target>.tar.gz
-./cuni version   # -> cuni 0.10.1
+#   cuni-0.10.2-x86_64-unknown-linux-gnu.tar.gz
+#   cuni-0.10.2-aarch64-unknown-linux-gnu.tar.gz
+#   cuni-0.10.2-x86_64-apple-darwin.tar.gz
+#   cuni-0.10.2-aarch64-apple-darwin.tar.gz
+tar xzf cuni-0.10.2-<target>.tar.gz
+./cuni version   # -> cuni 0.10.2
 
 # or via cargo-binstall (installs the prebuilt binary, no rustup needed)
-cargo binstall --git https://github.com/Slid-Phi-Labs/cuni --version 0.10.1
+cargo binstall --git https://github.com/Slid-Phi-Labs/cuni --version 0.10.2
 
 # Homebrew (tap not yet created; the formula tracks the prebuilt binary)
 # brew install ceedot-rock/tap/cuni
@@ -321,7 +321,9 @@ tests/
 assets/logo.png                        # brand mark
 ```
 
-## Status (v0.10.1)
+## Status (v0.10.2)
+
+**v0.10.2 (Nov 19):** crates.io and the install docs bumped so the registry points at the lab Studio. No language changes from v0.10.1.
 
 **v0.10.1 (Nov 5):** a version repair. Cargo.toml now matches the v0.10.1 tag, so the release binaries and crates.io line up. No language changes from v0.10.0.
 

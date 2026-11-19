@@ -1,6 +1,6 @@
 # CuNi
 
-> CuNi 0.10.1: write one program. It must print the same result on the targets you ask for (53 listed targets), or it refuses. It can also compile the same source to a deployable EVM smart contract (Solidity).
+> CuNi 0.10.2: write one program. It must print the same result on the targets you ask for (53 listed targets), or it refuses. It can also compile the same source to a deployable EVM smart contract (Solidity).
 
 ## Protocol
 - JSON: https://spl-cuni-studio.fly.dev/.well-known/cuni-protocol.json

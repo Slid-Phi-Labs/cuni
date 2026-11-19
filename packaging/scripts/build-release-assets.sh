@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Build release tarballs for cargo-binstall / GitHub Releases.
-# Usage: ./packaging/scripts/build-release-assets.sh 0.10.1
+# Usage: ./packaging/scripts/build-release-assets.sh 0.10.2
 set -euo pipefail
-VER="${1:-0.10.1}"
+VER="${1:-0.10.2}"
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 OUT="$ROOT/dist/release"
 mkdir -p "$OUT"

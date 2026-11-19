@@ -20,7 +20,7 @@ standard interop mechanism and requires exactness before a policy can run.
 ## Install
 
 ```bash
-cargo add cuni    # 0.10.1 on crates.io
+cargo add cuni    # 0.10.2 on crates.io
 ```
 
 ## Check exactness

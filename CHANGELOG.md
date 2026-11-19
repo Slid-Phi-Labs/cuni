@@ -6,6 +6,12 @@ Protocol v1.1.1 · Install: `cargo install cuni` · Studio: https://spl-cuni-stu
 
 ---
 
+## [0.10.2] — 2026-11-19 — "Studio URL on crates.io"
+- Version bump so crates.io can pick up the lab Studio address (spl-cuni-studio.fly.dev)
+- Install docs, Homebrew formula version, and public protocol tag advanced to 0.10.2
+- No language changes from v0.10.1
+- Homebrew sha256 values will be filled in from the release CHECKSUMS.txt after the tag builds
+
 ## [0.10.1] — 2026-11-05 — "Tag/version repair"
 - Cargo version bumped to 0.10.1 to match the v0.10.1 tag (unbreaks the release matrix + crates.io publish)
 - CI installs static solc 0.8.28 so the crosschain bytecode proof runs green

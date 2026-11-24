@@ -12,7 +12,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import stat
 import sys
 import tempfile
 import threading
@@ -45,9 +44,12 @@ class ApiVersionTests(unittest.TestCase):
     def setUp(self):
         self._env = dict(os.environ)
         self.tmp = tempfile.TemporaryDirectory()
+        # Studio children run as the sandbox uid (sandbox.py), so the fake
+        # binary's directory must be traversable by it, like /usr/local/bin.
+        os.chmod(self.tmp.name, 0o755)
         fake = Path(self.tmp.name) / "cuni"
         fake.write_text(FAKE_CUNI)
-        fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+        fake.chmod(0o755)  # executable by the sandbox uid too
         os.environ["CUNI_BIN"] = str(fake)
         os.environ["CUNI_BUILD_SHA"] = "0123456789abcdef0123456789abcdef01234567"
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
